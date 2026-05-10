@@ -71,6 +71,10 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         .long("flash")
         .value_name("path")
         .help("Path to a Flash ROM image (up to 512KB) loaded into virtual banks 0-31"))
+    .arg(Arg::with_name("dump")
+        .long("dump")
+        .value_name("path")
+        .help("Basename for memory dumps triggered by OUT (80h)"))
     .arg(Arg::with_name("disk_a").long("disk-a").value_name("path").short("a").default_value(".").help("directory to map disk A:"))
     .arg(Arg::with_name("disk_b").long("disk-b").value_name("path").short("b").help("directory to map disk B:"))
     .arg(Arg::with_name("disk_c").long("disk-c").value_name("path").short("c").help("directory to map disk C:"))
@@ -115,10 +119,14 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     let terminal = matches.value_of("terminal");
     let ccp_filename = matches.value_of("ccp");
     let flash_filename = matches.value_of("flash");
+    let dump_basename = matches.value_of("dump");
     let use_tpa = filename.is_none();
 
     // Init device
     let mut machine = CpmMachine::new();
+    if let Some(path) = dump_basename {
+        machine.set_dump_basename(std::path::PathBuf::from(path));
+    }
     if let Some(path) = flash_filename {
         let mut buf = Vec::new();
         match File::open(path) {

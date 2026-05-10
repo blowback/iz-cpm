@@ -1,3 +1,76 @@
+# iz-cpm — Microbeast fork
+
+This fork extends [iz-cpm](https://github.com/ivanizag/iz-cpm) with hardware features from the [Microbeast](https://github.com/) Z80 SBC so that Microbeast software can be developed and exercised on a host machine while still benefiting from iz-cpm's CP/M 2.2 emulation.
+
+## Memory banking
+
+The CPU's 64 KiB address space is divided into four 16 KiB *physical* banks. Each physical bank can be remapped to any of 64 *virtual* 16 KiB banks, giving 1 MiB of addressable memory:
+
+| Virtual bank range | Storage              |
+| ------------------ | -------------------- |
+| `0x00`–`0x1F`      | 512 KiB Flash ROM    |
+| `0x20`–`0x3F`      | 512 KiB RAM          |
+
+Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equivalent to writing `0x3F`.
+
+### Banking I/O ports
+
+| Port    | Purpose                                                                       |
+| ------- | ----------------------------------------------------------------------------- |
+| `0x70`  | Set the virtual bank that physical bank 0 (`0x0000`–`0x3FFF`) maps to         |
+| `0x71`  | Same for physical bank 1 (`0x4000`–`0x7FFF`)                                  |
+| `0x72`  | Same for physical bank 2 (`0x8000`–`0xBFFF`)                                  |
+| `0x73`  | Same for physical bank 3 (`0xC000`–`0xFFFF`)                                  |
+| `0x74`  | `0` = mapping disabled (CPU sees Flash banks 0–3), `1` = mapping enabled      |
+
+When mapping is enabled, writes to a physical bank that points at a Flash virtual bank (`0x00`–`0x1F`) are silently ignored. RAM banks (`0x20`–`0x3F`) are read/write.
+
+### Reset state
+
+On reset, iz-cpm enables mapping with physical banks 0–3 pointing at RAM virtual banks 32–35 (the first 64 KiB of RAM). This deliberately deviates from the Microbeast hardware reset (which leaves mapping disabled and points at Flash) so that iz-cpm's existing CP/M emulation, which writes to low memory during boot, continues to work without modification. A program that wants the hardware-faithful reset behaviour can simply `OUT (74h), 0`.
+
+### Preloading Flash
+
+Use `--flash <path>` to load up to 512 KiB of binary data into Flash ROM virtual banks 0–31 at startup. This is useful for testing Microbeast firmware images.
+
+```
+iz-cpm --flash microbeast-firmware.bin
+```
+
+## Memory dumping
+
+iz-cpm can dump memory pages to disk on demand, triggered by the running program writing to I/O port `0x80`. Pass `--dump <basename>` to enable; the basename is used for the first dump, with subsequent dumps getting a `.001`, `.002`, … numeric suffix inserted before any extension to avoid overwriting earlier files.
+
+The value written to port `0x80` selects what is dumped:
+
+| Value          | What is written                                                       |
+| -------------- | --------------------------------------------------------------------- |
+| `0x00`–`0x1F`  | The single Flash virtual bank `n` (16 KiB)                            |
+| `0x20`–`0x3F`  | The single RAM virtual bank `n` (16 KiB)                              |
+| `0x81`         | All Flash banks `0x00`–`0x1F` as one contiguous 512 KiB blob          |
+| `0x82`         | All RAM banks `0x20`–`0x3F` as one contiguous 512 KiB blob            |
+| `0x83`         | All banks: 512 KiB Flash followed by 512 KiB RAM (1 MiB total)        |
+| anything else  | No-op                                                                 |
+
+If `--dump` is not supplied, writes to port `0x80` are silently ignored.
+
+Example Z80 snippet to dump everything:
+
+```asm
+    LD  A, 83h
+    OUT (80h), A
+```
+
+Run with:
+
+```
+iz-cpm --dump snapshot.bin myprogram.com
+```
+
+Successive triggers produce `snapshot.bin`, `snapshot.001.bin`, `snapshot.002.bin`, …
+
+---
+
 # iz-cpm -- CP/M 2.2 environment
 
 ## What is this?

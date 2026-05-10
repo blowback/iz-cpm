@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use iz80::Machine;
 
 const BANK_SIZE: usize = 0x4000;            // 16 KiB
@@ -10,12 +13,17 @@ const BANK_MASK: u8 = 0x3F;                 // only the bottom 6 bits of a bank 
 const PORT_BANK0: u8 = 0x70;
 const PORT_BANK3: u8 = 0x73;
 const PORT_MAP_ENABLE: u8 = 0x74;
+const PORT_DUMP: u8 = 0x80;
+const DUMP_FLASH_ALL: u8 = 0x81;
+const DUMP_RAM_ALL: u8 = 0x82;
+const DUMP_ALL: u8 = 0x83;
 
 pub struct CpmMachine {
     flash: Vec<u8>,
     ram: Vec<u8>,
     bank_map: [u8; 4],
     mapping_enabled: bool,
+    dump_basename: Option<PathBuf>,
     in_values: [u8; 256],
     in_port: Option<u8>,
     out_port: Option<u8>,
@@ -33,10 +41,51 @@ impl CpmMachine {
             // Flash) so that CP/M's low-memory writes work out of the box.
             bank_map: [32, 33, 34, 35],
             mapping_enabled: true,
+            dump_basename: None,
             in_values: [0; 256],
             in_port: None,
             out_port: None,
             out_value: 0,
+        }
+    }
+
+    pub fn set_dump_basename(&mut self, path: PathBuf) {
+        self.dump_basename = Some(path);
+    }
+
+    fn handle_dump(&self, value: u8) {
+        let basename = match &self.dump_basename {
+            Some(p) => p,
+            None => return,
+        };
+        let bytes: Vec<u8> = match value {
+            0x00..=0x1F => {
+                let bank = value as usize;
+                self.flash[bank * BANK_SIZE..(bank + 1) * BANK_SIZE].to_vec()
+            }
+            0x20..=0x3F => {
+                let bank = (value - FLASH_BANKS as u8) as usize;
+                self.ram[bank * BANK_SIZE..(bank + 1) * BANK_SIZE].to_vec()
+            }
+            DUMP_FLASH_ALL => self.flash.clone(),
+            DUMP_RAM_ALL => self.ram.clone(),
+            DUMP_ALL => {
+                let mut v = Vec::with_capacity(FLASH_SIZE + RAM_SIZE);
+                v.extend_from_slice(&self.flash);
+                v.extend_from_slice(&self.ram);
+                v
+            }
+            _ => return,
+        };
+        match next_available_path(basename) {
+            Some(path) => match fs::write(&path, &bytes) {
+                Ok(()) => eprintln!("[[Wrote {} bytes to {}]]", bytes.len(), path.display()),
+                Err(err) => eprintln!("[[Failed to write dump to {}: {}]]", path.display(), err),
+            },
+            None => eprintln!(
+                "[[Failed to derive an unused dump filename from {}]]",
+                basename.display()
+            ),
         }
     }
 
@@ -105,12 +154,33 @@ impl Machine for CpmMachine {
             PORT_MAP_ENABLE => {
                 self.mapping_enabled = (value & 1) != 0;
             }
+            PORT_DUMP => self.handle_dump(value),
             _ => {
                 self.out_port = Some(port);
                 self.out_value = value;
             }
         }
     }
+}
+
+fn next_available_path(basename: &Path) -> Option<PathBuf> {
+    if !basename.exists() {
+        return Some(basename.to_path_buf());
+    }
+    let parent = basename.parent().unwrap_or_else(|| Path::new(""));
+    let stem = basename.file_stem().and_then(|s| s.to_str()).unwrap_or("dump");
+    let ext = basename.extension().and_then(|s| s.to_str());
+    for n in 1..10_000 {
+        let name = match ext {
+            Some(e) => format!("{}.{:03}.{}", stem, n, e),
+            None => format!("{}.{:03}", stem, n),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -224,6 +294,142 @@ mod tests {
         let mut m = CpmMachine::new();
         let oversized = vec![0u8; FLASH_SIZE + 1];
         assert!(m.load_flash(&oversized).is_err());
+    }
+
+    fn temp_basename(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "izcpm-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("dump.bin")
+    }
+
+    #[test]
+    fn dump_single_flash_page_writes_one_bank() {
+        let basename = temp_basename("flash-page");
+        let mut m = CpmMachine::new();
+        m.flash[5 * BANK_SIZE] = 0x11;
+        m.flash[5 * BANK_SIZE + 1] = 0x22;
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, 0x05);
+
+        let bytes = std::fs::read(&basename).unwrap();
+        assert_eq!(bytes.len(), BANK_SIZE);
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[1], 0x22);
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dump_single_ram_page_writes_one_bank() {
+        let basename = temp_basename("ram-page");
+        let mut m = CpmMachine::new();
+        // Write into RAM bank 33 (=virtual bank 0x21).
+        m.ram[1 * BANK_SIZE] = 0xAB;
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, 0x21);
+
+        let bytes = std::fs::read(&basename).unwrap();
+        assert_eq!(bytes.len(), BANK_SIZE);
+        assert_eq!(bytes[0], 0xAB);
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dump_flash_all_writes_512k() {
+        let basename = temp_basename("flash-all");
+        let mut m = CpmMachine::new();
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, DUMP_FLASH_ALL);
+
+        let bytes = std::fs::read(&basename).unwrap();
+        assert_eq!(bytes.len(), FLASH_SIZE);
+        assert!(bytes.iter().all(|&b| b == 0xFF));
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dump_ram_all_writes_512k() {
+        let basename = temp_basename("ram-all");
+        let mut m = CpmMachine::new();
+        m.ram[123] = 0x77;
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, DUMP_RAM_ALL);
+
+        let bytes = std::fs::read(&basename).unwrap();
+        assert_eq!(bytes.len(), RAM_SIZE);
+        assert_eq!(bytes[123], 0x77);
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dump_all_writes_flash_then_ram() {
+        let basename = temp_basename("all");
+        let mut m = CpmMachine::new();
+        m.flash[0] = 0xF0;
+        m.ram[0] = 0x55;
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, DUMP_ALL);
+
+        let bytes = std::fs::read(&basename).unwrap();
+        assert_eq!(bytes.len(), FLASH_SIZE + RAM_SIZE);
+        assert_eq!(bytes[0], 0xF0);
+        assert_eq!(bytes[FLASH_SIZE], 0x55);
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn collision_derives_numbered_filenames() {
+        let basename = temp_basename("collision");
+        let mut m = CpmMachine::new();
+        m.set_dump_basename(basename.clone());
+
+        m.port_out(PORT_DUMP as u16, 0x00);
+        m.port_out(PORT_DUMP as u16, 0x00);
+        m.port_out(PORT_DUMP as u16, 0x00);
+
+        let dir = basename.parent().unwrap();
+        let stem = basename.file_stem().unwrap().to_str().unwrap();
+        let ext = basename.extension().unwrap().to_str().unwrap();
+        assert!(basename.exists(), "first dump should use the basename");
+        assert!(dir.join(format!("{}.001.{}", stem, ext)).exists());
+        assert!(dir.join(format!("{}.002.{}", stem, ext)).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dump_with_no_basename_is_a_noop() {
+        let mut m = CpmMachine::new();
+        // No panic, no file written, no side effects.
+        m.port_out(PORT_DUMP as u16, 0x00);
+        m.port_out(PORT_DUMP as u16, DUMP_ALL);
+    }
+
+    #[test]
+    fn dump_with_invalid_value_is_a_noop() {
+        let basename = temp_basename("invalid");
+        let mut m = CpmMachine::new();
+        m.set_dump_basename(basename.clone());
+
+        // 0x40..=0x80 (excl. 0x80 itself which is the trigger) and 0x84..=0xFF
+        // are reserved/no-op.
+        m.port_out(PORT_DUMP as u16, 0x40);
+        m.port_out(PORT_DUMP as u16, 0x84);
+        m.port_out(PORT_DUMP as u16, 0xFF);
+
+        assert!(!basename.exists());
+        std::fs::remove_dir_all(basename.parent().unwrap()).unwrap();
     }
 
     #[test]
