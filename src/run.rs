@@ -338,6 +338,16 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     loop {
         cpu.execute_instruction(&mut machine);
 
+        // Runaway guard (single-program mode): a loaded .COM is entered once at
+        // the TPA base. Nothing in a well-behaved program jumps back to it — a
+        // PC landing there mid-run means control was lost (stack/IP corruption
+        // sliding into cold start), which otherwise spins forever with no
+        // timeout. Turn that silent hang into an immediate diagnostic.
+        if !use_tpa && cpu.registers().pc() == binary_address {
+            eprintln!("iz-cpm: program re-entered the TPA base ({:#06x}) — aborting (stack/IP corruption?)", binary_address);
+            break;
+        }
+
         // MicroBeast firmware page-mapping routines (MBB_SET_PAGE / MBB_GET_PAGE).
         // The page registers are write-only; the BIOS owns the authoritative
         // shadow, so antforth calls these instead of poking the ports directly.
