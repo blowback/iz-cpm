@@ -4,24 +4,51 @@ This fork extends [iz-cpm](https://github.com/ivanizag/iz-cpm) with hardware fea
 
 ## Memory banking
 
-The CPU's 64 KiB address space is divided into four 16 KiB *physical* banks. Each physical bank can be remapped to any of 64 *virtual* 16 KiB banks, giving 1 MiB of addressable memory:
+The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each physical bank can be remapped to any of 64 *physical* 16 KiB banks, giving 1 MiB of addressable memory:
 
-| Virtual bank range | Storage              |
+| Physical bank range | Storage              |
 | ------------------ | -------------------- |
 | `0x00`–`0x1F`      | 512 KiB Flash ROM    |
 | `0x20`–`0x3F`      | 512 KiB RAM          |
 
 Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equivalent to writing `0x3F`.
 
-### Banking I/O ports
+### The blessed way: BIOS page-mapping routines
 
-| Port    | Purpose                                                                       |
-| ------- | ----------------------------------------------------------------------------- |
-| `0x70`  | Set the virtual bank that physical bank 0 (`0x0000`–`0x3FFF`) maps to         |
-| `0x71`  | Same for physical bank 1 (`0x4000`–`0x7FFF`)                                  |
-| `0x72`  | Same for physical bank 2 (`0x8000`–`0xBFFF`)                                  |
-| `0x73`  | Same for physical bank 3 (`0xC000`–`0xFFFF`)                                  |
-| `0x74`  | `0` = mapping disabled (CPU sees Flash banks 0–3), `1` = mapping enabled      |
+**If you want to touch memory banking, use the BIOS routines.** They are the only supported, hardware-faithful way to read and change the mapping, and iz-cpm now emulates them exactly as the real MicroBeast firmware exposes them:
+
+| Routine        | Address  | Inputs                              | Output                                  |
+| -------------- | -------- | ----------------------------------- | --------------------------------------- |
+| `MBB_SET_PAGE` | `0xFDDF` | `A` = logical page (0–2), `E` = physical page (`0x00`–`0x3F`) | — |
+| `MBB_GET_PAGE` | `0xFDDC` | `C` = logical page (0–2)            | `A` = physical page, or `0xFF` on error |
+
+
+```asm
+    ; Map the CPU's third 16 KiB window (0x8000–0xBFFF) to RAM bank 0x2A
+    LD   A, 2          ; logical page 2
+    LD   E, 2Ah        ; physical (virtual) bank 0x2A
+    CALL 0FDDFh        ; MBB_SET_PAGE
+
+    ; Read back which physical bank logical page 2 is on
+    LD   C, 2
+    CALL 0FDDCh        ; MBB_GET_PAGE -> A = 2Ah
+```
+
+`MBB_SET_PAGE` updates both the hardware register and the BIOS's authoritative shadow of the mapping; `MBB_GET_PAGE` returns that shadow. Because the BIOS owns the shadow (and may re-page during disk operations), going through these routines is the only way to keep your view of the mapping in sync with reality.
+
+### Banking I/O ports (here be dragons)
+
+> ⚠️ **The bank-control registers (ports `0x70`–`0x73`) are WRITE-ONLY.** On real Microbeast hardware you cannot read back the latched bank — a read returns open bus, not the current mapping. iz-cpm faithfully emulates this: reading one of these ports yields a floating bus value (approximated by the port number), **not** the value you last wrote. Earlier iz-cpm versions incorrectly let you read the mapping back; code that relied on that is broken on hardware.
+>
+> Worse, a direct `OUT` to these ports changes the hardware register but **does not** update the BIOS shadow, so a subsequent `MBB_GET_PAGE` will read back stale data and silently desync. Any sane person should use the BIOS routines above and steer clear of these ports entirely.
+
+| Port    | Access    | Purpose                                                                       |
+| ------- | --------- | ----------------------------------------------------------------------------- |
+| `0x70`  | write-only | Set the virtual bank that physical bank 0 (`0x0000`–`0x3FFF`) maps to        |
+| `0x71`  | write-only | Same for physical bank 1 (`0x4000`–`0x7FFF`)                                 |
+| `0x72`  | write-only | Same for physical bank 2 (`0x8000`–`0xBFFF`)                                 |
+| `0x73`  | write-only | Same for physical bank 3 (`0xC000`–`0xFFFF`)                                 |
+| `0x74`  | read/write | `0` = mapping disabled (CPU sees Flash banks 0–3), `1` = mapping enabled     |
 
 When mapping is enabled, writes to a physical bank that points at a Flash virtual bank (`0x00`–`0x1F`) are silently ignored. RAM banks (`0x20`–`0x3F`) are read/write.
 
