@@ -43,6 +43,12 @@ impl Bios {
             machine.poke16(entry_point+1, ret_trap);
             machine.poke(ret_trap, 0xc9 /*ret*/);
         }
+
+        // MicroBeast firmware page-mapping routines: a CALL lands on the RET,
+        // the run loop detects PC at the address and performs the operation on
+        // the machine's registers/shadow, then the RET returns to the caller.
+        machine.poke(MBB_GET_PAGE_ADDRESS, 0xc9 /*ret*/);
+        machine.poke(MBB_SET_PAGE_ADDRESS, 0xc9 /*ret*/);
     }
 
     pub fn status(&mut self, console: &mut dyn ConsoleEmulator) -> u8 {

@@ -22,6 +22,13 @@ pub struct CpmMachine {
     flash: Vec<u8>,
     ram: Vec<u8>,
     bank_map: [u8; 4],
+    // The MicroBeast page registers (ports 0x70-0x73) are WRITE-ONLY on real
+    // hardware: you cannot read back the latched page. The BIOS keeps the
+    // authoritative shadow of the mapping (and can re-page under disk ops),
+    // exposed via MBB_GET_PAGE / MBB_SET_PAGE. We model that shadow separately
+    // so that direct `OUT (0x7x)` (which writes the register but NOT the BIOS
+    // shadow) visibly desyncs from MBB_GET_PAGE — the real hazard antforth hit.
+    bios_shadow: [u8; 4],
     mapping_enabled: bool,
     dump_basename: Option<PathBuf>,
     in_values: [u8; 256],
@@ -40,6 +47,7 @@ impl CpmMachine {
             // hardware reset (which leaves mapping disabled and points at
             // Flash) so that CP/M's low-memory writes work out of the box.
             bank_map: [32, 33, 34, 35],
+            bios_shadow: [32, 33, 34, 35],
             mapping_enabled: true,
             dump_basename: None,
             in_values: [0; 256],
@@ -109,6 +117,33 @@ impl CpmMachine {
             phys as u8
         }
     }
+
+    /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page
+    /// E (00-1F ROM, 20-3F RAM). Writes BOTH the hardware register (bank_map,
+    /// used for address translation) AND the BIOS shadow — this is the blessed
+    /// way to switch a page and the only way the shadow stays authoritative.
+    /// Logical page 3 (the BIOS's own page) is not user-settable; ignored.
+    pub fn mbb_set_page(&mut self, logical: u8, physical: u8) {
+        let logical = logical as usize;
+        if logical > 2 {
+            return;
+        }
+        let phys = physical & BANK_MASK;
+        self.bank_map[logical] = phys;
+        self.bios_shadow[logical] = phys;
+    }
+
+    /// MBB_GET_PAGE (BIOS 0xFDDC): return the physical page mapped to logical
+    /// CPU page C (0-2) per the BIOS shadow, or 0xFF on error (logical > 2).
+    /// Note: returns the SHADOW, not the live register — a prior direct
+    /// `OUT (0x7x)` that bypassed the shadow will read back stale here, exactly
+    /// as on hardware.
+    pub fn mbb_get_page(&self, logical: u8) -> u8 {
+        if logical > 2 {
+            return 0xFF;
+        }
+        self.bios_shadow[logical as usize]
+    }
 }
 
 impl Machine for CpmMachine {
@@ -135,7 +170,12 @@ impl Machine for CpmMachine {
     fn port_in(&mut self, address: u16) -> u8 {
         let port = address as u8;
         match port {
-            PORT_BANK0..=PORT_BANK3 => self.bank_map[(port - PORT_BANK0) as usize],
+            // Page registers are WRITE-ONLY on real hardware. A read floats
+            // (open bus); we approximate with the low address byte (the port
+            // number), which is what the bus tends to reflect and matches the
+            // one observed silicon reading. Code must use MBB_GET_PAGE to read
+            // the mapping, never IN on these ports.
+            PORT_BANK0..=PORT_BANK3 => port,
             PORT_MAP_ENABLE => self.mapping_enabled as u8,
             _ => {
                 let value = self.in_values[port as usize];
@@ -241,10 +281,59 @@ mod tests {
     }
 
     #[test]
-    fn bank_register_is_masked_to_six_bits() {
+    fn page_registers_are_write_only() {
+        // Reading a page register does NOT return the latched page (the
+        // registers are write-only on real hardware); it returns open bus,
+        // approximated by the port number. The write itself still takes effect
+        // (verified via address translation), it just can't be read back.
         let mut m = CpmMachine::new();
-        m.port_out(0x70, 0xFF);
-        assert_eq!(m.port_in(0x70), 0x3F);
+        m.port_out(0x72, 0x2A);
+        assert_eq!(m.port_in(0x72), 0x72, "read floats to the port number, not the latch");
+        // The write landed: logical page 2 now translates through RAM bank 0x2A.
+        m.poke(0x8000, 0x5C);
+        assert_eq!(m.ram[(0x2A - FLASH_BANKS) * BANK_SIZE], 0x5C);
+    }
+
+    #[test]
+    fn bank_register_write_is_masked_to_six_bits() {
+        // The write is still masked to 6 bits even though it can't be read back.
+        let mut m = CpmMachine::new();
+        m.port_out(0x71, 0xFF);            // page register <- 0xFF, effective 0x3F (RAM bank 63)
+        m.poke(0x4000, 0xC7);              // write through logical page 1
+        let expected_offset = (0x3F - FLASH_BANKS) * BANK_SIZE; // RAM offset for bank 0x3F
+        assert_eq!(m.ram[expected_offset], 0xC7);
+        assert_eq!(m.peek(0x4000), 0xC7);
+    }
+
+    #[test]
+    fn mbb_set_get_page_round_trips_via_shadow() {
+        let mut m = CpmMachine::new();
+        // Set logical page 2 to physical RAM page 0x37 via the BIOS routine.
+        m.mbb_set_page(2, 0x37);
+        assert_eq!(m.mbb_get_page(2), 0x37);
+        // It also moved the live mapping: page 2 translates through bank 0x37.
+        m.poke(0x8000, 0xA5);
+        assert_eq!(m.ram[(0x37 - FLASH_BANKS) * BANK_SIZE], 0xA5);
+        // Defaults elsewhere intact.
+        assert_eq!(m.mbb_get_page(0), 32);
+        assert_eq!(m.mbb_get_page(1), 33);
+        // Logical page 3 (BIOS page) is not gettable/settable.
+        assert_eq!(m.mbb_get_page(3), 0xFF);
+    }
+
+    #[test]
+    fn direct_out_desyncs_the_bios_shadow() {
+        // The whole point of the model: a direct OUT writes the register but
+        // NOT the BIOS shadow, so MBB_GET_PAGE reads back stale — exactly the
+        // hazard that bit antforth on hardware.
+        let mut m = CpmMachine::new();
+        m.mbb_set_page(2, 0x30);           // shadow and register agree: 0x30
+        assert_eq!(m.mbb_get_page(2), 0x30);
+        m.port_out(0x72, 0x3B);            // direct write: register -> 0x3B, shadow untouched
+        assert_eq!(m.mbb_get_page(2), 0x30, "shadow is stale after a direct OUT");
+        // The live mapping did change (register is authoritative for translation).
+        m.poke(0x8000, 0x11);
+        assert_eq!(m.ram[(0x3B - FLASH_BANKS) * BANK_SIZE], 0x11);
     }
 
     #[test]

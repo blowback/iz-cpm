@@ -15,6 +15,11 @@ pub const BDOS_DPB0_ADDRESS:      u16 = 0xf900;
 pub const BDOS_ALVEC0_ADDRESS:    u16 = 0xf910;
 pub const BIOS_BASE_ADDRESS:      u16 = 0xff00;
 
+// MicroBeast firmware page-mapping entry points (not part of the CP/M BIOS
+// jump table). Emulated as RET-traps detected in the run loop.
+pub const MBB_GET_PAGE_ADDRESS:   u16 = 0xfddc; // C=logical page 0-2 -> A=physical (0xFF err)
+pub const MBB_SET_PAGE_ADDRESS:   u16 = 0xfddf; // A=logical page 0-2, E=physical
+
 // Exit conditions
 #[derive(PartialEq)]
 pub enum ExecutionResult {

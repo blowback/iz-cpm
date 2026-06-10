@@ -338,6 +338,25 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     loop {
         cpu.execute_instruction(&mut machine);
 
+        // MicroBeast firmware page-mapping routines (MBB_SET_PAGE / MBB_GET_PAGE).
+        // The page registers are write-only; the BIOS owns the authoritative
+        // shadow, so antforth calls these instead of poking the ports directly.
+        // A CALL lands on the RET poked at the address; we perform the op here,
+        // then the RET executes next iteration and returns to the caller.
+        match cpu.registers().pc() {
+            MBB_SET_PAGE_ADDRESS => {
+                let logical = cpu.registers().get8(Reg8::A);
+                let physical = cpu.registers().get8(Reg8::E);
+                machine.mbb_set_page(logical, physical);
+            }
+            MBB_GET_PAGE_ADDRESS => {
+                let logical = cpu.registers().get8(Reg8::C);
+                let physical = machine.mbb_get_page(logical);
+                cpu.registers().set8(Reg8::A, physical);
+            }
+            _ => {}
+        }
+
         if cpu.is_halted() {
             println!("HALT instruction");
             break;
