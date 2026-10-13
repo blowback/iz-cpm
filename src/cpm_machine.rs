@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use iz80::Machine;
 
 #[cfg(feature = "videobeast")]
+use crate::constants::FIRMWARE_CONSOLE_BYTE;
+#[cfg(feature = "videobeast")]
 use crate::videobeast::VideoBeast;
 
 const BANK_SIZE: usize = 0x4000;            // 16 KiB
@@ -57,6 +59,10 @@ pub struct CpmMachine {
     // parallel threads and must not each start SDL.
     #[cfg(feature = "videobeast")]
     videobeast: Option<VideoBeast>,
+    // Set by `run()` after the BIOS table is written: from then on writes
+    // reaching RAM byte FIRMWARE_CONSOLE_BYTE are dropped.
+    #[cfg(feature = "videobeast")]
+    firmware_byte_guarded: bool,
 }
 
 impl CpmMachine {
@@ -80,12 +86,40 @@ impl CpmMachine {
             instr_start_ps: 0,
             #[cfg(feature = "videobeast")]
             videobeast: None,
+            #[cfg(feature = "videobeast")]
+            firmware_byte_guarded: false,
         }
     }
 
     #[cfg(feature = "videobeast")]
     pub fn attach_videobeast(&mut self, videobeast: VideoBeast) {
         self.videobeast = Some(videobeast);
+    }
+
+    /// From now on, drop writes whose target is the RAM byte at
+    /// FIRMWARE_CONSOLE_BYTE (the reset mapping puts it at CPU 0xFF2B). A
+    /// program storing the firmware console byte would otherwise overwrite
+    /// the fake BIOS jump table. Call after `Bios::setup`.
+    #[cfg(feature = "videobeast")]
+    pub fn guard_firmware_byte(&mut self) {
+        self.firmware_byte_guarded = true;
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn firmware_byte_write_ignored(&self, index: usize, value: u8) -> bool {
+        if self.firmware_byte_guarded && index == FIRMWARE_CONSOLE_BYTE as usize {
+            eprintln!(
+                "iz-cpm: ignored write of 0x{:02X} to 0x{:04X} (firmware console byte)",
+                value, FIRMWARE_CONSOLE_BYTE
+            );
+            return true;
+        }
+        false
+    }
+
+    #[cfg(not(feature = "videobeast"))]
+    fn firmware_byte_write_ignored(&self, _index: usize, _value: u8) -> bool {
+        false
     }
 
     #[cfg(feature = "videobeast")]
@@ -232,7 +266,11 @@ impl Machine for CpmMachine {
 
     fn poke(&mut self, address: u16, value: u8) {
         match self.decode(address) {
-            Target::Ram(index) => self.ram[index] = value,
+            Target::Ram(index) => {
+                if !self.firmware_byte_write_ignored(index, value) {
+                    self.ram[index] = value;
+                }
+            }
             Target::VideoBeast(offset) => self.videobeast_write(offset, value),
             // Flash ROM: writes are silently ignored.
             Target::Flash(_) => {}
@@ -686,5 +724,41 @@ mod tests {
         for i in 0..3 {
             assert_eq!(m.peek(0x0300 + i), 0xC0 + i as u8);
         }
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn guarded_firmware_byte_write_is_ignored() {
+        let mut m = CpmMachine::new();
+        m.poke(0xFF2B, 0x8E);
+        m.guard_firmware_byte();
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x8E);
+        // Neighbours are not guarded.
+        m.poke(0xFF2A, 0x11);
+        m.poke(0xFF2C, 0x22);
+        assert_eq!(m.peek(0xFF2A), 0x11);
+        assert_eq!(m.peek(0xFF2C), 0x22);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn unguarded_firmware_byte_write_lands() {
+        let mut m = CpmMachine::new();
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x24);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn firmware_byte_write_lands_when_page_3_is_remapped() {
+        let mut m = CpmMachine::new();
+        m.guard_firmware_byte();
+        // Page 3 to RAM bank 4: CPU 0xFF2B is no longer RAM byte 0xFF2B.
+        m.port_out(PORT_BANK3 as u16, PAGE_TYPE_RAM | 4);
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x24);
+        assert_eq!(m.ram[4 * BANK_SIZE + 0x3F2B], 0x24);
+        assert_eq!(m.ram[0xFF2B], 0);
     }
 }

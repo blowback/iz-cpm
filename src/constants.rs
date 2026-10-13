@@ -15,6 +15,13 @@ pub const BDOS_DPB0_ADDRESS:      u16 = 0xf900;
 pub const BDOS_ALVEC0_ADDRESS:    u16 = 0xf910;
 pub const BIOS_BASE_ADDRESS:      u16 = 0xff00;
 
+// MicroBeast firmware 1.8 console byte (screen_page). Under iz-cpm it lies
+// inside the fake BIOS jump table (low byte of the WRITE entry's target), so
+// with feature `videobeast` CPU writes to it are ignored once the BIOS is set
+// up (`CpmMachine::guard_firmware_byte`).
+#[cfg(feature = "videobeast")]
+pub const FIRMWARE_CONSOLE_BYTE:  u16 = 0xff2b;
+
 // MicroBeast firmware page-mapping entry points (not part of the CP/M BIOS
 // jump table). Emulated as RET-traps detected in the run loop.
 pub const MBB_GET_PAGE_ADDRESS:   u16 = 0xfddc; // C=logical page 0-2 -> A=physical (0xFF err)

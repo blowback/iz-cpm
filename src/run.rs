@@ -27,9 +27,18 @@ const WELCOME: &str =
 CP/M 2.2 Emulation
 Press ctrl-c ctrl-c Y to return to host";
 
+// Exit codes returned by `run` (architecture AD-20). Under feature
+// `videobeast` main passes them to the process; the stock build ignores them.
+const EXIT_OK: i32 = 0;
+const EXIT_ERROR: i32 = 1;
+#[cfg(feature = "videobeast")]
+const EXIT_CYCLE_LIMIT: i32 = 2;
+
 static CCP_BINARY: &[u8] = include_bytes!("../third-party/bin/zcpr.bin");
 
-pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) {
+/// Runs iz-cpm to completion and returns the exit code: EXIT_OK for a normal
+/// end, EXIT_CYCLE_LIMIT for `--max-cycles`, EXIT_ERROR for anything else.
+pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) -> i32 {
     // Parse arguments
     let app = App::new(WELCOME)
     .arg(Arg::with_name("CMD")
@@ -93,6 +102,15 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     .arg(Arg::with_name("disk_n").long("disk-n").value_name("path").help("directory to map disk N:"))
     .arg(Arg::with_name("disk_o").long("disk-o").value_name("path").help("directory to map disk O:"))
     .arg(Arg::with_name("disk_p").long("disk-p").value_name("path").help("directory to map disk P:"));
+    #[cfg(feature = "videobeast")]
+    let app = app
+    .arg(Arg::with_name("exit_on_warmboot")
+        .long("exit-on-warmboot")
+        .help("Ends iz-cpm when a program warm boots, instead of reloading the CCP"))
+    .arg(Arg::with_name("max_cycles")
+        .long("max-cycles")
+        .value_name("N")
+        .help("Ends iz-cpm with exit code 2 once the CPU has run N T-states"));
 
     let matches = match command_line {
         None => app.get_matches_safe(),
@@ -107,7 +125,10 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         Ok(m) => m,
         Err(e) => {
             eprint!("{}", e);
-            return;
+            return match e.kind {
+                clap::ErrorKind::HelpDisplayed | clap::ErrorKind::VersionDisplayed => EXIT_OK,
+                _ => EXIT_ERROR,
+            };
         }
     };
         
@@ -123,6 +144,21 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     let flash_filename = matches.value_of("flash");
     let dump_basename = matches.value_of("dump");
     let use_tpa = filename.is_none();
+    #[cfg(feature = "videobeast")]
+    let exit_on_warmboot = matches.is_present("exit_on_warmboot");
+    #[cfg(not(feature = "videobeast"))]
+    let exit_on_warmboot = false;
+    #[cfg(feature = "videobeast")]
+    let max_cycles: Option<u64> = match matches.value_of("max_cycles") {
+        None => None,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("Invalid --max-cycles value \"{}\": expected a whole number of T-states.", text);
+                return EXIT_ERROR;
+            }
+        },
+    };
 
     // Init device
     let mut machine = CpmMachine::new();
@@ -136,18 +172,18 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         match File::open(path) {
             Err(err) => {
                 eprintln!("Error opening flash image \"{}\": {}", path, err);
-                return;
+                return EXIT_ERROR;
             }
             Ok(mut file) => {
                 if let Err(err) = file.read_to_end(&mut buf) {
                     eprintln!("Error reading flash image \"{}\": {}", path, err);
-                    return;
+                    return EXIT_ERROR;
                 }
             }
         }
         if let Err(err) = machine.load_flash(&buf) {
             eprintln!("Error loading flash image \"{}\": {}", path, err);
-            return;
+            return EXIT_ERROR;
         }
     }
     let mut cpu = match cpu_model {
@@ -155,7 +191,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         Some("8080") => Cpu::new_8080(),
         _ => {
             eprintln!("Invalid CPU model. Choose \"z80\" or \"8080\" as the CPU.");
-            return;
+            return EXIT_ERROR;
         }
     };
 
@@ -165,7 +201,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         Some("ansi") => Box::new(Transparent::new()),
         _ => {
             eprintln!("Unkown terminal emulation. Choose \"adm3a\" or \"ansi\".");
-            return;
+            return EXIT_ERROR;
         }
     };
 /*     let console = match console {
@@ -175,6 +211,8 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
 */
     let mut bios = Bios::new(/*console, */term_emu);
     bios.setup(&mut machine);
+    #[cfg(feature = "videobeast")]
+    machine.guard_firmware_byte();
 
     // Init BDOS
     let mut bdos = Bdos::new();
@@ -186,7 +224,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         if let Some(path) = res {
             if let Err(err) = fs::read_dir(path) {
                 eprintln!("Error with directory \"{}\": {}", path, err);
-                return;
+                return EXIT_ERROR;
             }
             bdos.assign_drive(i, path.to_string());
         }
@@ -209,13 +247,13 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                     match File::open(name) {
                         Err(err) => {
                             eprintln!("Error opening ccp \"{}\": {}", name, err);
-                            return; //process::exit(1);
+                            return EXIT_ERROR;
                         },
                         Ok(mut file) => {
                             match file.read(&mut buf) {
                                 Err(err) => {
                                     eprintln!("Error loading ccp \"{}\": {}", name, err);
-                                    return; //process::exit(1);
+                                    return EXIT_ERROR;
                                 },
                                 Ok(size) => {
                                     binary_size = size;
@@ -227,7 +265,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                 }
             };
             binary_address = CCP_BASE_ADDRESS;
-            println!("{}", WELCOME);
+            diagln!("{}", WELCOME);
         },
         Some(name) => {
             /*
@@ -238,13 +276,13 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             match File::open(name) {
                 Err(err) => {
                     eprintln!("Error opening \"{}\": {}", name, err);
-                    return; //process::exit(1);
+                    return EXIT_ERROR;
                 },
                 Ok(mut file) => {
                     match file.read(&mut buf) {
                         Err(err) => {
                             eprintln!("Error loading \"{}\": {}", name, err);
-                            return; //process::exit(1);
+                            return EXIT_ERROR;
                         },
                         Ok(size) => {
                             binary = &buf;
@@ -318,7 +356,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                 if let Some(arg1) = parts.next() {
                     if let Some(file1) = name_to_8_3(arg1) {
                         if call_trace {
-                            println!("[[FCB1 loaded with {}]]", file1);
+                            diagln!("[[FCB1 loaded with {}]]", file1);
                         }
                         Fcb::new(FCB1_ADDRESS).set_name_direct(&mut machine, file1);
                     }
@@ -326,7 +364,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                 if let Some(arg2) = parts.next() {
                     if let Some(file2) = name_to_8_3(arg2) {
                         if call_trace {
-                            println!("[[FCB2 loaded with {}]]", file2);
+                            diagln!("[[FCB2 loaded with {}]]", file2);
                         }
                         Fcb::new(FCB2_ADDRESS).set_name_direct(&mut machine, file2);
                     }
@@ -339,7 +377,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     cpu.registers().set_pc(binary_address);
     cpu.set_trace(cpu_trace);
     let mut n = 0;
-    loop {
+    let exit_code = loop {
         // VideoBeast accesses are stamped with the time the instruction
         // starts; the catch-up after the previous instruction already brought
         // the VideoBeast to that time, so its clock never goes backwards.
@@ -349,6 +387,14 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         #[cfg(feature = "videobeast")]
         machine.videobeast_catch_up(cpu.cycle_count() * PS_PER_T_STATE);
 
+        #[cfg(feature = "videobeast")]
+        if let Some(limit) = max_cycles {
+            if cpu.cycle_count() >= limit {
+                eprintln!("iz-cpm: cycle limit reached (--max-cycles {}) at PC {:#06x}", limit, cpu.registers().pc());
+                break EXIT_CYCLE_LIMIT;
+            }
+        }
+
         // Runaway guard (single-program mode): a loaded .COM is entered once at
         // the TPA base. Nothing in a well-behaved program jumps back to it — a
         // PC landing there mid-run means control was lost (stack/IP corruption
@@ -356,7 +402,7 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         // timeout. Turn that silent hang into an immediate diagnostic.
         if !use_tpa && cpu.registers().pc() == binary_address {
             eprintln!("iz-cpm: program re-entered the TPA base ({:#06x}) — aborting (stack/IP corruption?)", binary_address);
-            break;
+            break EXIT_ERROR;
         }
 
         // MicroBeast firmware page-mapping routines (MBB_SET_PAGE / MBB_GET_PAGE).
@@ -379,8 +425,8 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         }
 
         if cpu.is_halted() {
-            println!("HALT instruction");
-            break;
+            diagln!("HALT instruction");
+            break EXIT_ERROR;
         }
 
         let mut er = bios.execute(console, cpu.registers(), call_trace_all);
@@ -391,22 +437,23 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
 
         match er {
             ExecutionResult::Continue => (),
+            // Only unimplemented BIOS or BDOS calls stop the run this way.
             ExecutionResult::Stop => {
-                break;
+                break EXIT_ERROR;
             },
             ExecutionResult::StopConfirm => {
                 eprintln!();
                 eprintln!("Press Y to exit iz-cpm. Any other key to continue.");
                 let ch = bios.read(console) as char;
                 if ch == 'Y' || ch == 'y' {
-                    break;
+                    break EXIT_OK;
                 }
             },
             ExecutionResult::WarmBoot => {
                 if call_trace || call_trace_all {
-                    print!("[[Warm boot]]");
+                    diag!("[[Warm boot]]");
                 }
-                if use_tpa {
+                if use_tpa && !exit_on_warmboot {
                     bdos.warm_reset(&mut machine);
                     for i in 0..binary_size {
                         machine.poke(binary_address + i as u16, binary[i]);
@@ -415,12 +462,12 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                     let user_drive = machine.peek(CCP_USER_DRIVE_ADDRESS);
                     cpu.registers().set8(Reg8::C, user_drive);
                 } else {
-                    break;
+                    break EXIT_OK;
                 }
             },
             ExecutionResult::ColdBoot => {
                 if call_trace || call_trace_all {
-                    print!("[[Cold boot]]");
+                    diag!("[[Cold boot]]");
                 }
                 if use_tpa {
                     bdos.reset(&mut machine);
@@ -432,13 +479,13 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                     cpu.registers().set8(Reg8::C, user_drive);
                     bdos.reset(&mut machine); // Reset Bdos
                 } else {
-                    break;
+                    break EXIT_OK;
                 }
             }
         }
 
         if console.terminated() {
-            break;
+            break EXIT_OK;
         }
 
         if slow {
@@ -448,5 +495,6 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
                 n = 0;
             }
         }
-    }
+    };
+    exit_code
 }

@@ -116,7 +116,7 @@ pub fn execute_bdos(bdos: &mut Bdos, bios: &mut Bios, console: &mut dyn ConsoleE
             } else {
                 "unknown"
             };
-            print!("[[BDOS command {}: {}({:04x})]]", command, name, arg16);
+            diag!("[[BDOS command {}: {}({:04x})]]", command, name, arg16);
         }
 
         let mut res8: Option<u8> = None;
@@ -280,12 +280,12 @@ pub fn execute_bdos(bdos: &mut Bdos, bios: &mut Bios, console: &mut dyn ConsoleE
         // will copy it to A and B.
         let res = if let Some(a) = res8 {
             if bdos_trace {
-                println!("[[=>{:02x}]]", a);
+                diagln!("[[=>{:02x}]]", a);
             }
             a as u16
         } else if let Some(hl) = res16 {
             if bdos_trace {
-                println!("[[=>{:04x}]]", hl);
+                diagln!("[[=>{:04x}]]", hl);
             }
             hl
         } else {

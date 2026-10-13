@@ -115,6 +115,27 @@ CI runs this as the `videobeast` job in `.github/workflows/rust.yml`, beside the
 
 Emulated time is the Z80 cycle count at 8 MHz (125,000 ps per T-state). Start-up registers and palettes come from `$BEASTEM_ASSETS`, or from `vendor/beastem/assets` when it is unset. Only one VideoBeast exists per process at a time.
 
+### Scripted runs
+
+With the feature, stdout carries only the CP/M console. Every iz-cpm message (the banner, `-t`/`-T` call traces, `HALT instruction`, errors) and the VideoBeast's log lines go to stderr. The exception is `-z`/`--cpu-trace`: those lines come from the iz80 crate and stay on stdout.
+
+Two extra flags:
+
+- `--exit-on-warmboot`: when running the CCP (no program given), end iz-cpm when a program warm boots instead of reloading the CCP. A program given on the command line already ends iz-cpm when it warm boots.
+- `--max-cycles N`: end iz-cpm once the CPU has run N T-states (checked after each instruction), with a message on stderr.
+
+The process exit code says how the run ended:
+
+| Code | End |
+|---|---|
+| 0 | Warm or cold boot, Ctrl-C Ctrl-C Y, `--help`, `--version` |
+| 1 | Emulator error: bad arguments, missing file, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 2 | `--max-cycles` reached |
+
+The stock build keeps its output on stdout and always exits 0.
+
+The MicroBeast firmware console byte `0xFF2B` (screen_page) lies inside iz-cpm's BIOS jump table, so once the BIOS is set up, writes that reach that RAM byte, from the program or from iz-cpm itself, are ignored, and each one is logged on stderr. A program reads back the jump table's value (`0x8E`). Writes reach it normally when page 3 is mapped elsewhere.
+
 Test programs under `tests/artifacts/vb/` are committed as `.COM` files next to their source; `cargo test` never assembles them. After editing a source, rebuild with sjasmplus 1.24.0 (or set `$SJASMPLUS`) and commit both:
 
 ```

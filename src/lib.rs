@@ -1,3 +1,15 @@
+// iz-cpm's own messages (traces, banner, run results). Under feature
+// `videobeast` they go to stderr so stdout carries only the CP/M console;
+// the stock build keeps them on stdout.
+#[cfg(feature = "videobeast")]
+macro_rules! diag { ($($arg:tt)*) => { eprint!($($arg)*) }; }
+#[cfg(feature = "videobeast")]
+macro_rules! diagln { ($($arg:tt)*) => { eprintln!($($arg)*) }; }
+#[cfg(not(feature = "videobeast"))]
+macro_rules! diag { ($($arg:tt)*) => { print!($($arg)*) }; }
+#[cfg(not(feature = "videobeast"))]
+macro_rules! diagln { ($($arg:tt)*) => { println!($($arg)*) }; }
+
 mod bdos;
 mod bios;
 mod constants;

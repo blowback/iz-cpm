@@ -63,7 +63,7 @@ pub fn open(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // from the first record.
     let mut fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Open file {}]]", fcb.get_name_for_log(env));
+        diag!("[[Open file {}]]", fcb.get_name_for_log(env));
     }
     match find_host_files(env, &fcb, false, false) {
         Err(_) => FILE_NOT_FOUND, // Error or file not found
@@ -94,7 +94,7 @@ pub fn make(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // and thus a subsequent open is not necessary.
     let mut fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Create file {}]]", fcb.get_name_for_log(env));
+        diag!("[[Create file {}]]", fcb.get_name_for_log(env));
     }
     match create_file(env, &fcb) {
         Err(_) => FILE_NOT_FOUND, // Error or file not found
@@ -138,7 +138,7 @@ fn truncate_if_needed(env: &mut BdosEnvironment, fcb: &Fcb, os_file_name: &OsStr
     }
 
     if env.call_trace {
-        println!("Truncating file from {} to {}", record_count, fcb_record_count);
+        diagln!("Truncating file from {} to {}", record_count, fcb_record_count);
     }
 
     let file = fs::OpenOptions::new().write(true).open(os_file_name)?;
@@ -155,7 +155,7 @@ pub fn delete(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // be found; otherwise, a value in the range 0 to 3 returned.
     let fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Delete file {}]]", fcb.get_name_for_log(env));
+        diag!("[[Delete file {}]]", fcb.get_name_for_log(env));
     }
 
     match find_host_files(env, &fcb, true, true) {
@@ -184,7 +184,7 @@ pub fn set_attributes(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // system expansion.
     let fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Set attribuyes {}]]", fcb.get_name_for_log(env));
+        diag!("[[Set attribuyes {}]]", fcb.get_name_for_log(env));
     }
 
     match find_host_files(env, &fcb, false, true) {
@@ -203,7 +203,7 @@ pub fn rename(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // the first filename could not be found in the directory scan.
     let fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Rename file {} to {}]]", fcb.get_name_for_log(env), fcb.get_name_secondary(env));
+        diag!("[[Rename file {} to {}]]", fcb.get_name_for_log(env), fcb.get_name_secondary(env));
     }
     match find_host_files(env, &fcb, false, true) {
         Err(_) => FILE_NOT_FOUND, // Error or file not found
@@ -237,7 +237,7 @@ pub fn read(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     let mut fcb = Fcb::new(fcb_address);
     let record = fcb.get_sequential_record_number(env);
     if env.call_trace {
-        print!("[Read record {:x} into {:04x}]", record, env.state.dma);
+        diag!("[Read record {:x} into {:04x}]", record, env.state.dma);
     }
 
     let extent_changed = fcb.inc_current_record(env);
@@ -279,7 +279,7 @@ pub fn write(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     let mut fcb = Fcb::new(fcb_address);
     let record = fcb.get_sequential_record_number(env);
     if env.call_trace {
-        print!("[Write record {:x} from {:04x}]", record, env.state.dma);
+        diag!("[Write record {:x} from {:04x}]", record, env.state.dma);
     }
 
     let buffer = env.load_buffer_from_dma();
@@ -347,7 +347,7 @@ pub fn read_rand(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     let fcb = Fcb::new(fcb_address);
     let record = fcb.get_random_record_number(env);
     if env.call_trace {
-        print!("[Read random record {:x} into {:04x}]", record, env.state.dma);
+        diag!("[Read random record {:x} into {:04x}]", record, env.state.dma);
     }
     if record > 65535 {
         return 6; //06	seek Past Physical end of disk
@@ -382,7 +382,7 @@ pub fn write_rand(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     let fcb = Fcb::new(fcb_address);
     let record = fcb.get_random_record_number(env);
     if env.call_trace {
-        print!("[Write random record {:x} into {:04x}]", record, env.state.dma);
+        diag!("[Write random record {:x} into {:04x}]", record, env.state.dma);
     }
     if record > 65535 {
         return 6; //06	seek Past Physical end of disk
@@ -466,7 +466,7 @@ pub fn set_random_record(env: &mut BdosEnvironment, fcb_address: u16) {
     // from the selected point in the file.
     let mut fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Set pos of {}]]", fcb.get_name_for_log(env));
+        diag!("[[Set pos of {}]]", fcb.get_name_for_log(env));
     }
     let record = fcb.get_sequential_record_number(env);
     fcb.set_random_record_number(env, record as u32);
@@ -493,7 +493,7 @@ pub fn search_first(env: &mut BdosEnvironment, fcb_address: u16) -> u8 {
     // field is not a question mark, the s2 byte is automatically zeroed.
     let fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[DIR start {}]]", fcb.get_name_for_log(env));
+        diag!("[[DIR start {}]]", fcb.get_name_for_log(env));
     }
     env.state.dir_drive = fcb.get_drive(env);
     env.state.dir_pattern = fcb.get_name(env);
@@ -532,7 +532,7 @@ pub fn compute_file_size(env: &mut BdosEnvironment, fcb_address: u16) {
     // actually allocated.
     let mut fcb = Fcb::new(fcb_address);
     if env.call_trace {
-        print!("[[Size of {}]]", fcb.get_name_for_log(env));
+        diag!("[[Size of {}]]", fcb.get_name_for_log(env));
     }
     let size = compute_file_size_internal(env, &fcb);
     match size {
