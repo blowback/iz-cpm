@@ -147,7 +147,7 @@ impl CpmMachine {
 }
 
 impl Machine for CpmMachine {
-    fn peek(&self, address: u16) -> u8 {
+    fn peek(&mut self, address: u16) -> u8 {
         let virt = self.virtual_bank(address) as usize;
         let offset = (address as usize) & (BANK_SIZE - 1);
         if virt < FLASH_BANKS {
@@ -529,5 +529,42 @@ mod tests {
         assert_eq!(m.out_value, 0x99);
         let _ = m.port_in(0x20);
         assert_eq!(m.in_port, Some(0x20));
+    }
+
+    #[test]
+    fn ldir_takes_21_t_states_per_repeat_and_16_on_the_last() {
+        // VideoBeast raster timing is derived from the cycle count, so block
+        // moves must cost what the real Z80 charges (fixed in iz80 0.5).
+        let mut m = CpmMachine::new();
+        let program = [
+            0x01, 0x03, 0x00, // LD BC,3
+            0x21, 0x00, 0x02, // LD HL,0x0200
+            0x11, 0x00, 0x03, // LD DE,0x0300
+            0xED, 0xB0,       // LDIR
+        ];
+        for (i, b) in program.iter().enumerate() {
+            m.poke(0x0100 + i as u16, *b);
+        }
+        for i in 0..3 {
+            m.poke(0x0200 + i, 0xC0 + i as u8);
+        }
+
+        let mut cpu = iz80::Cpu::new_z80();
+        cpu.registers().set_pc(0x0100);
+        for _ in 0..3 {
+            cpu.execute_instruction(&mut m);
+        }
+
+        let mut costs = Vec::new();
+        for _ in 0..3 {
+            let before = cpu.cycle_count();
+            cpu.execute_instruction(&mut m);
+            costs.push(cpu.cycle_count() - before);
+        }
+        assert_eq!(costs, vec![21, 21, 16]);
+        assert_eq!(cpu.registers().pc(), 0x010B);
+        for i in 0..3 {
+            assert_eq!(m.peek(0x0300 + i), 0xC0 + i as u8);
+        }
     }
 }
