@@ -10,7 +10,7 @@ The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each
 | ------------------ | -------------------- |
 | `0x00`–`0x1F`      | 512 KiB Flash ROM    |
 | `0x20`–`0x3F`      | 512 KiB RAM          |
-| `0x40`–`0x5F`      | VideoBeast (not attached yet: reads `0xFF`, writes ignored) |
+| `0x40`–`0x5F`      | VideoBeast with feature `videobeast`; otherwise reads `0xFF`, writes ignored |
 | `0x60`–`0xFF`      | Flash ROM, bank `page & 0x1F` |
 
 All 8 bits of a page value are kept, so writing `0xFF` selects Flash bank `0x1F`.
@@ -97,6 +97,23 @@ iz-cpm --dump snapshot.bin myprogram.com
 ```
 
 Successive triggers produce `snapshot.bin`, `snapshot.001.bin`, `snapshot.002.bin`, …
+
+## VideoBeast (feature `videobeast`)
+
+Building with `--features videobeast` attaches beastem's VideoBeast, vendored unmodified in `vendor/beastem/` (check with `cd vendor/beastem && sha256sum -c UPSTREAM`), to pages `0x40`–`0x5F`. It needs a C++ compiler, `pkg-config` and the SDL2 development files (`libsdl2-dev` on Debian/Ubuntu). SDL runs with its `dummy` video driver, so no display is needed; the VideoBeast's log lines go to stderr.
+
+```
+cargo build --features videobeast
+cargo test --features videobeast
+```
+
+Emulated time is the Z80 cycle count at 8 MHz (125,000 ps per T-state). Start-up registers and palettes come from `$BEASTEM_ASSETS`, or from `vendor/beastem/assets` when it is unset. Only one VideoBeast exists per process at a time.
+
+Test programs under `tests/artifacts/vb/` are committed as `.COM` files next to their source; `cargo test` never assembles them. After editing a source, rebuild with sjasmplus 1.24.0 (or set `$SJASMPLUS`) and commit both:
+
+```
+tests/artifacts/vb/build.sh
+```
 
 ---
 

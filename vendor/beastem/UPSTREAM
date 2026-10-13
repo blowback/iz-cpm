@@ -1,0 +1,12 @@
+# Unmodified copies from BeastEm.
+# repo:   github.com/blowback/BeastEm
+# commit: db3e37cd26faf00d1745a7ff0187f64f17e6b6ab
+# Source paths: src/<file> for the sources, assets/<file> for the .mem files.
+# Check with: cd vendor/beastem && sha256sum -c UPSTREAM
+9e1044558eb1a843f7636a3aef2745a811db914967753e7fea19cf810e3b2192  videobeast.cpp
+2b8795a422f55b9066f479bc101b248841c81532353ef20498aaae2cbc2c84dd  videobeast.hpp
+6f19bf9a9f534b51cc438519c142e58196d0ce3395f9fb848933bce393a1d1d1  assets.cpp
+201ee74a3e98897953d254168c1accb564a499e79c7275a79b394d695499901a  assets.hpp
+21912b2b6c85cdfbca3ff30799faeffd3b9dc172b93979e5cc799bafde434d40  assets/video_registers.mem
+4167b57fb0fabf6320e0b537cfdd1f1bb3ba13338a76ff882a11ccc9a33c1d58  assets/palette_1.mem
+385294a343a90da7d2bfd1917642e6740b48ea229c651db995d285f0c8906be3  assets/palette_2.mem

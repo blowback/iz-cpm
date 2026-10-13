@@ -50,6 +50,12 @@ impl <'a> ConsoleTest <'a> {
         c
     }
 
+    /// True once every step of the script has been met. A program that
+    /// exits on its own never calls status(), so a test must check this.
+    pub fn finished(&self) -> bool {
+        self.terminate
+    }
+
     fn next_step(&mut self) {
         self.input.clear();
         self.expected_output = None;

@@ -18,6 +18,8 @@ use crate::fcb::*;
 use crate::terminal::TerminalEmulator;
 use crate::terminal::Transparent;
 use crate::terminal_adm3a::Adm3aToAnsi;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::{VideoBeast, PS_PER_T_STATE};
 
 // Welcome message
 const WELCOME: &str =
@@ -124,6 +126,8 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
 
     // Init device
     let mut machine = CpmMachine::new();
+    #[cfg(feature = "videobeast")]
+    machine.attach_videobeast(VideoBeast::new());
     if let Some(path) = dump_basename {
         machine.set_dump_basename(std::path::PathBuf::from(path));
     }
@@ -336,7 +340,14 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     cpu.set_trace(cpu_trace);
     let mut n = 0;
     loop {
+        // VideoBeast accesses are stamped with the time the instruction
+        // starts; the catch-up after the previous instruction already brought
+        // the VideoBeast to that time, so its clock never goes backwards.
+        #[cfg(feature = "videobeast")]
+        machine.set_instr_start_ps(cpu.cycle_count() * PS_PER_T_STATE);
         cpu.execute_instruction(&mut machine);
+        #[cfg(feature = "videobeast")]
+        machine.videobeast_catch_up(cpu.cycle_count() * PS_PER_T_STATE);
 
         // Runaway guard (single-program mode): a loaded .COM is entered once at
         // the TPA base. Nothing in a well-behaved program jumps back to it — a

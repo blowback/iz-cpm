@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use iz80::Machine;
 
+#[cfg(feature = "videobeast")]
+use crate::videobeast::VideoBeast;
+
 const BANK_SIZE: usize = 0x4000;            // 16 KiB
 const FLASH_BANKS: usize = 32;              // virtual banks 0..32
 const RAM_BANKS: usize = 32;                // virtual banks 32..64
@@ -22,11 +25,11 @@ const DUMP_RAM_ALL: u8 = 0x82;
 const DUMP_ALL: u8 = 0x83;
 
 /// Where a CPU address lands after page translation; indices are into
-/// `flash` or `ram`.
+/// `flash` or `ram`, the VideoBeast offset is within its 16 KB window.
 enum Target {
     Flash(usize),
     Ram(usize),
-    VideoBeast,
+    VideoBeast(u16),
 }
 
 pub struct CpmMachine {
@@ -46,6 +49,14 @@ pub struct CpmMachine {
     in_port: Option<u8>,
     out_port: Option<u8>,
     out_value: u8,
+    // Emulated time at which the current instruction started; VideoBeast
+    // accesses are stamped with it.
+    #[cfg(feature = "videobeast")]
+    instr_start_ps: u64,
+    // Attached by `run()`, never by `new()`: unit tests build machines in
+    // parallel threads and must not each start SDL.
+    #[cfg(feature = "videobeast")]
+    videobeast: Option<VideoBeast>,
 }
 
 impl CpmMachine {
@@ -65,8 +76,55 @@ impl CpmMachine {
             in_port: None,
             out_port: None,
             out_value: 0,
+            #[cfg(feature = "videobeast")]
+            instr_start_ps: 0,
+            #[cfg(feature = "videobeast")]
+            videobeast: None,
         }
     }
+
+    #[cfg(feature = "videobeast")]
+    pub fn attach_videobeast(&mut self, videobeast: VideoBeast) {
+        self.videobeast = Some(videobeast);
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn set_instr_start_ps(&mut self, ps: u64) {
+        self.instr_start_ps = ps;
+    }
+
+    /// Brings the attached VideoBeast up to `now_ps`.
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast_catch_up(&mut self, now_ps: u64) {
+        if let Some(vb) = &mut self.videobeast {
+            vb.catch_up(now_ps);
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn videobeast_read(&mut self, offset: u16) -> u8 {
+        match &mut self.videobeast {
+            Some(vb) => vb.read(offset, self.instr_start_ps),
+            None => 0xFF,
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn videobeast_write(&mut self, offset: u16, value: u8) {
+        if let Some(vb) = &mut self.videobeast {
+            vb.write(offset, value, self.instr_start_ps);
+        }
+    }
+
+    // No VideoBeast attached: the bus floats high.
+    #[cfg(not(feature = "videobeast"))]
+    fn videobeast_read(&mut self, _offset: u16) -> u8 {
+        0xFF
+    }
+
+    // No VideoBeast attached: writes go nowhere.
+    #[cfg(not(feature = "videobeast"))]
+    fn videobeast_write(&mut self, _offset: u16, _value: u8) {}
 
     pub fn set_dump_basename(&mut self, path: PathBuf) {
         self.dump_basename = Some(path);
@@ -130,7 +188,7 @@ impl CpmMachine {
         let bank = (page & PAGE_BANK_MASK) as usize;
         match page & PAGE_TYPE_MASK {
             PAGE_TYPE_RAM => Target::Ram(bank * BANK_SIZE + offset),
-            PAGE_TYPE_VIDEOBEAST => Target::VideoBeast,
+            PAGE_TYPE_VIDEOBEAST => Target::VideoBeast(offset as u16),
             _ => Target::Flash(bank * BANK_SIZE + offset),
         }
     }
@@ -168,17 +226,16 @@ impl Machine for CpmMachine {
         match self.decode(address) {
             Target::Flash(index) => self.flash[index],
             Target::Ram(index) => self.ram[index],
-            // No VideoBeast attached: the bus floats high.
-            Target::VideoBeast => 0xFF,
+            Target::VideoBeast(offset) => self.videobeast_read(offset),
         }
     }
 
     fn poke(&mut self, address: u16, value: u8) {
         match self.decode(address) {
             Target::Ram(index) => self.ram[index] = value,
-            // Flash ROM: writes are silently ignored. No VideoBeast attached:
-            // writes go nowhere.
-            Target::Flash(_) | Target::VideoBeast => {}
+            Target::VideoBeast(offset) => self.videobeast_write(offset, value),
+            // Flash ROM: writes are silently ignored.
+            Target::Flash(_) => {}
         }
     }
 

@@ -12,6 +12,8 @@ mod fcb;
 mod terminal;
 mod terminal_adm3a;
 mod run;
+#[cfg(feature = "videobeast")]
+mod videobeast;
 
 #[cfg(windows)]
 mod console_windows;

@@ -6,10 +6,12 @@ pub use izcpm::Step as Step;
 pub fn run_script(script: Vec<Step>) {
     let mut console = ConsoleTest::new(script);
     izcpm::run(None, &mut console);
+    assert!(console.finished(), "the run ended before the script was met");
 }
 
 #[allow(dead_code)]
 pub fn run_script_with_args(script: Vec<Step>, args: Vec<&str>) {
     let mut console = ConsoleTest::new(script);
     izcpm::run(Some(args), &mut console);
+    assert!(console.finished(), "the run ended before the script was met");
 }
