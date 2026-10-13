@@ -102,10 +102,16 @@ Successive triggers produce `snapshot.bin`, `snapshot.001.bin`, `snapshot.002.bi
 
 Building with `--features videobeast` attaches beastem's VideoBeast, vendored unmodified in `vendor/beastem/` (check with `cd vendor/beastem && sha256sum -c UPSTREAM`), to pages `0x40`–`0x5F`. It needs a C++ compiler, `pkg-config` and the SDL2 development files (`libsdl2-dev` on Debian/Ubuntu). SDL runs with its `dummy` video driver, so no display is needed; the VideoBeast's log lines go to stderr.
 
+On Debian/Ubuntu:
+
 ```
+sudo apt-get update
+sudo apt-get install -y libsdl2-dev pkg-config g++
 cargo build --features videobeast
 cargo test --features videobeast
 ```
+
+CI runs this as the `videobeast` job in `.github/workflows/rust.yml`, beside the stock build.
 
 Emulated time is the Z80 cycle count at 8 MHz (125,000 ps per T-state). Start-up registers and palettes come from `$BEASTEM_ASSETS`, or from `vendor/beastem/assets` when it is unset. Only one VideoBeast exists per process at a time.
 
