@@ -49,6 +49,16 @@ uint8_t  vbshim_read_register(vbshim *h, uint8_t r);
 /* Palette 1 or 2: entry byte >> 1, low byte for even byte, high for odd. */
 uint8_t  vbshim_read_palette(vbshim *h, int palette, uint16_t byte);
 
+/* Preload, for --vb-preload. Neither call changes a register as stored. */
+
+/* Copy len bytes to VRAM from addr. The caller checks addr + len <= 1 MiB. */
+void     vbshim_preload_vram(vbshim *h, uint32_t addr, const uint8_t *data, uint32_t len);
+
+/* Load palette p (0 = palette 1, 1 = palette 2) from bank (0-3) upward, as a
+ * CPU writing the palette window would, 128 bytes per bank, even byte low.
+ * Bytes past the end of bank 3 are dropped. */
+void     vbshim_preload_palette(vbshim *h, int p, int bank, const uint8_t *data, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif

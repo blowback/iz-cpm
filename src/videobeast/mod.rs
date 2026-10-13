@@ -8,6 +8,7 @@
 
 pub mod capture;
 pub mod joy;
+pub mod preload;
 
 use std::ffi::{c_char, c_int, CString};
 use std::ptr::NonNull;
@@ -32,6 +33,8 @@ extern "C" {
     fn vbshim_vram(h: *mut VbShim) -> *const u8;
     fn vbshim_read_register(h: *mut VbShim, r: u8) -> u8;
     fn vbshim_read_palette(h: *mut VbShim, palette: c_int, byte: u16) -> u8;
+    fn vbshim_preload_vram(h: *mut VbShim, addr: u32, data: *const u8, len: u32);
+    fn vbshim_preload_palette(h: *mut VbShim, p: c_int, bank: c_int, data: *const u8, len: u32);
 }
 
 /// Bytes of VRAM.
@@ -128,6 +131,25 @@ impl VideoBeast {
     pub fn palette_byte(&self, palette: u8, byte: u16) -> u8 {
         assert!(palette == 1 || palette == 2, "palette {}", palette);
         unsafe { vbshim_read_palette(self.handle.as_ptr(), palette as c_int, byte) }
+    }
+
+    /// Copies `data` into VRAM from `addr`. Panics if it would run past the
+    /// top of VRAM.
+    pub fn preload_vram(&mut self, addr: u32, data: &[u8]) {
+        assert!(addr as usize + data.len() <= VRAM_SIZE, "{} bytes at {:#X} run past VRAM", data.len(), addr);
+        unsafe { vbshim_preload_vram(self.handle.as_ptr(), addr, data.as_ptr(), data.len() as u32) }
+    }
+
+    /// Loads palette `p` (0 for palette 1, 1 for palette 2) from `bank`
+    /// (0-3) upward, 128 bytes per bank, as CPU writes to the palette window
+    /// would. Bytes past the end of bank 3 are dropped. Registers are left
+    /// as they were.
+    pub fn preload_palette(&mut self, p: u8, bank: u8, data: &[u8]) {
+        assert!(p <= 1 && bank <= 3, "palette {} bank {}", p, bank);
+        let len = data.len().min((4 - bank as usize) * 128);
+        unsafe {
+            vbshim_preload_palette(self.handle.as_ptr(), p as c_int, bank as c_int, data.as_ptr(), len as u32)
+        }
     }
 }
 

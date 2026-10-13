@@ -2,6 +2,7 @@
 #include "vbshim.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <new>
 
@@ -124,4 +125,31 @@ extern "C" uint8_t vbshim_read_register(vbshim *h, uint8_t r) {
 
 extern "C" uint8_t vbshim_read_palette(vbshim *h, int palette, uint16_t byte) {
     return h->vb->readPalette(palette, byte);
+}
+
+extern "C" void vbshim_preload_vram(vbshim *h, uint32_t addr, const uint8_t *data, uint32_t len) {
+    std::memcpy(h->vb->memoryPtr() + addr, data, len);
+}
+
+// VideoBeast's REG_LOWER_REG, REG_LOCKED and SET_UNLOCKED, which are private.
+static const uint8_t REG_LOWER_REG = 0xF5;
+static const uint8_t REG_LOCKED = 0xFE;
+static const uint8_t SET_UNLOCKED = 0xF3;
+
+// Goes through VideoBeast::write, the CPU path, so beastem converts each
+// entry to a colour for the right palette. VideoBeast::writePalette is not
+// used: its palette 2 branch converts the palette 1 entry.
+extern "C" void vbshim_preload_palette(vbshim *h, int p, int bank, const uint8_t *data, uint32_t len) {
+    const uint8_t saved_select = h->vb->readRegister(REG_LOWER_REG);
+    const uint8_t saved_lock = h->vb->readRegister(REG_LOCKED);
+    h->vb->writeRegister(REG_LOCKED, SET_UNLOCKED);
+    uint32_t done = 0;
+    for (int b = bank; b <= 3 && done < len; b++) {
+        h->vb->writeRegister(REG_LOWER_REG, static_cast<uint8_t>((p << 2) | b));
+        for (uint16_t i = 0; i < 128 && done < len; i++, done++) {
+            h->vb->write(0x3F00 + i, data[done], 0);
+        }
+    }
+    h->vb->writeRegister(REG_LOWER_REG, saved_select);
+    h->vb->writeRegister(REG_LOCKED, saved_lock);
 }

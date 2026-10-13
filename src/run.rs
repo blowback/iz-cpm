@@ -24,6 +24,8 @@ use crate::videobeast::{VideoBeast, PS_PER_T_STATE};
 use crate::videobeast::joy::JoyScript;
 #[cfg(feature = "videobeast")]
 use crate::videobeast::capture::{self, FrameList};
+#[cfg(feature = "videobeast")]
+use crate::videobeast::preload::Preload;
 
 // Welcome message
 const WELCOME: &str =
@@ -134,7 +136,11 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     .arg(Arg::with_name("out")
         .long("out")
         .value_name("DIR")
-        .help("Directory for --dump-at and --png-at files; created if missing"));
+        .help("Directory for --dump-at and --png-at files; created if missing"))
+    .arg(Arg::with_name("vb_preload")
+        .long("vb-preload")
+        .value_name("LOADTXT")
+        .help("Before the program starts, loads the vXXXXX.vbm and vPB.vbp files listed in LOADTXT into VRAM and palettes, as SLIDE RV does"));
 
     let matches = match command_line {
         None => app.get_matches_safe(),
@@ -243,6 +249,17 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             Some(dir)
         }
     };
+    #[cfg(feature = "videobeast")]
+    let preload = match matches.value_of("vb_preload") {
+        None => Preload::default(),
+        Some(path) => match Preload::load(std::path::Path::new(path)) {
+            Ok(preload) => preload,
+            Err(err) => {
+                eprintln!("{}", err);
+                return EXIT_ERROR;
+            }
+        },
+    };
     // Listed frames not yet captured, in order.
     #[cfg(feature = "videobeast")]
     let mut pending_captures: std::collections::BTreeSet<u64> =
@@ -253,7 +270,11 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     // Init device
     let mut machine = CpmMachine::new();
     #[cfg(feature = "videobeast")]
-    machine.attach_videobeast(VideoBeast::new());
+    {
+        let mut videobeast = VideoBeast::new();
+        preload.apply(&mut videobeast);
+        machine.attach_videobeast(videobeast);
+    }
     #[cfg(feature = "videobeast")]
     machine.set_joy_script(joy_script);
     if let Some(path) = dump_basename {

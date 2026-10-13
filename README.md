@@ -128,6 +128,7 @@ Extra flags:
 - `--dump-at LIST`: as each listed frame starts, write the VideoBeast's VRAM, registers and both palettes, the Z80's 64K view and the RAM banks to `--out`.
 - `--png-at LIST`: as each listed frame starts, write a PNG of the VideoBeast window to `--out`.
 - `--out DIR`: where `--dump-at` and `--png-at` write; created if missing. Needed whenever either list is given.
+- `--vb-preload LOADTXT`: before the program starts, load a SLIDE file set into VRAM and the palettes, as `SLIDE RV` does on hardware. See "Preloading VRAM and palettes" below.
 
 Frames are numbered from the program: frame 0 starts as the first instruction at `0x100` is about to run, and frame n starts at the nth wrap of the VideoBeast line counter to 0 after that. In the start-up mode (`0x08`) a frame is 525 lines of 256 T-states, 134,400 T-states; the first wrap comes 256 T-states later than that, since the VideoBeast starts on its last line with the counter at 0. When running the CCP, frame 0 starts the first time a program starts at `0x100`; later programs do not restart the count. Until then `--frames` cannot end the run and port `0x9F` reads `0x00`.
 
@@ -146,7 +147,7 @@ The process exit code says how the run ended:
 | Code | End |
 |---|---|
 | 0 | Warm or cold boot, `--frames` reached, Ctrl-C Ctrl-C Y, `--help`, `--version` |
-| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, capture file not written, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, bad `--vb-preload` set, capture file not written, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
 | 2 | `--max-cycles` reached |
 
 The stock build keeps its output on stdout and always exits 0.
@@ -185,6 +186,27 @@ VRAM, registers `0x00`-`0x7F` and the palette entries the asset files do not fil
 ```
 tests/artifacts/vb/golden.sh
 ```
+
+#### Preloading VRAM and palettes
+
+`--vb-preload LOADTXT` names a text file listing one path per line, relative to the directory holding it. Blank lines are skipped and trailing whitespace (including `\r`) is trimmed. The file name of each path decides what happens, by SLIDE's rules (case does not matter):
+
+- `vXXXXX.vbm`, `v` and exactly five hex digits: the file's bytes go to VRAM from address `0xXXXXX`.
+- `vPB.vbp`, `P` in `0`-`1` and `B` in `0`-`3`: the file loads palette `P` (`0` is palette 1, `1` palette 2) from bank `B` upward, 128 bytes (64 entries) per bank, even byte low. Loading stops after bank 3; the rest of the file is dropped.
+- Any other name is ignored, with a line on stderr naming the `LOADTXT` path as given, the line and the listed path, e.g. `iz-cpm: set/load.txt:3: ignoring tools/GAME.COM (not a SLIDE VRAM or palette name)`. Ignored files are not read.
+
+For example:
+
+```
+v20000.vbm
+sprites/v40000.vbm
+v00.vbp
+v10.vbp
+```
+
+Files apply in listed order, so where two overlap the later one wins. Bytes are written as they are, with no `0x1A` stripping and no padding. The preload is applied before frame 0's captures, so `--dump-at 0` shows it. It changes VRAM and palette contents only: every register is as it would be without `--vb-preload`. On hardware SLIDE leaves register `0xF5` at its last palette select; iz-cpm does not.
+
+A `load.txt` that cannot be read, a listed file that cannot be read, or a `.vbm` whose address plus length is past `0x100000` ends iz-cpm with exit code 1 before the CPU starts, naming `load.txt`, the line and the listed path, e.g. `iz-cpm: set/load.txt:2: vFFF80.vbm: 256 bytes at 0xFFF80 run past the top of VRAM`. (SLIDE on hardware writes the earlier files before it gives up on an overrunning one; iz-cpm refuses the whole set first.)
 
 ---
 
