@@ -41,16 +41,38 @@ static Uint32 newest_window_id() {
     return found;
 }
 
-extern "C" vbshim *vbshim_create(const char *assets_dir) {
+extern "C" vbshim *vbshim_create(const char *assets_dir, int windowed) {
     // The vendored code logs to std::cout; stdout belongs to the CP/M console.
     std::cout.rdbuf(std::cerr.rdbuf());
 
-    // Override priority, so SDL_VIDEODRIVER etc. in the environment cannot win.
-    SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "dummy", SDL_HINT_OVERRIDE);
+    // Headless: override priority, so SDL_VIDEODRIVER etc. in the
+    // environment cannot win. Windowed: SDL's normal driver choice.
+    if (!windowed) {
+        SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "dummy", SDL_HINT_OVERRIDE);
+    }
     SDL_SetHintWithPriority(SDL_HINT_NO_SIGNAL_HANDLERS, "1", SDL_HINT_OVERRIDE);
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         std::cerr << "vbshim: SDL_Init failed: " << SDL_GetError() << std::endl;
+        // --window: no window can open, so end as the vendored code does.
+        if (windowed) {
+            std::exit(1);
+        }
         return nullptr;
+    }
+    // With no display, SDL 2.0.22 and later fall back to the offscreen
+    // driver, which would run without a visible window. Unless the
+    // environment asked for a driver, treat that as SDL failing to open the
+    // window: log it and exit 1, as the vendored code does.
+    if (windowed) {
+        const char *requested = SDL_getenv("SDL_VIDEODRIVER");
+        const char *driver = SDL_GetCurrentVideoDriver();
+        const bool headless = driver != nullptr
+            && (std::strcmp(driver, "offscreen") == 0 || std::strcmp(driver, "dummy") == 0);
+        if (headless && (requested == nullptr || requested[0] == '\0')) {
+            std::cerr << "vbshim: --window: no display to open a window on (SDL chose its "
+                      << driver << " video driver)" << std::endl;
+            std::exit(1);
+        }
     }
 
     initAssetPath(assets_dir);
@@ -98,6 +120,26 @@ extern "C" void vbshim_write(vbshim *h, uint16_t addr, uint8_t data, uint64_t ps
 
 extern "C" uint64_t vbshim_frame_count(vbshim *h) {
     return h->vb->*member_of(FrameCountTag());
+}
+
+extern "C" int vbshim_poll(vbshim *h) {
+    int quit = 0;
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            quit = 1;
+        } else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE
+                   && event.window.windowID == h->window_id) {
+            quit = 1;
+        }
+    }
+    return quit;
+}
+
+extern "C" int vbshim_key_down(int scancode) {
+    int count = 0;
+    const Uint8 *state = SDL_GetKeyboardState(&count);
+    return scancode >= 0 && scancode < count && state[scancode] != 0;
 }
 
 extern "C" const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int *pitch) {

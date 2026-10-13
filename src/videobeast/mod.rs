@@ -9,6 +9,7 @@
 pub mod capture;
 pub mod joy;
 pub mod preload;
+pub mod window;
 
 use std::ffi::{c_char, c_int, CString};
 use std::ptr::NonNull;
@@ -23,12 +24,14 @@ struct VbShim {
 }
 
 extern "C" {
-    fn vbshim_create(assets_dir: *const c_char) -> *mut VbShim;
+    fn vbshim_create(assets_dir: *const c_char, windowed: c_int) -> *mut VbShim;
     fn vbshim_destroy(h: *mut VbShim);
     fn vbshim_tick(h: *mut VbShim, ps: u64) -> u64;
     fn vbshim_read(h: *mut VbShim, addr: u16, ps: u64) -> u8;
     fn vbshim_write(h: *mut VbShim, addr: u16, data: u8, ps: u64);
     fn vbshim_frame_count(h: *mut VbShim) -> u64;
+    fn vbshim_poll(h: *mut VbShim) -> c_int;
+    fn vbshim_key_down(scancode: c_int) -> c_int;
     fn vbshim_frame(h: *mut VbShim, width: *mut c_int, height: *mut c_int, pitch: *mut c_int) -> *const u32;
     fn vbshim_vram(h: *mut VbShim) -> *const u8;
     fn vbshim_read_register(h: *mut VbShim, r: u8) -> u8;
@@ -62,7 +65,19 @@ impl VideoBeast {
     /// Creates a VideoBeast at time 0, loading its start-up registers and
     /// palettes from `$BEASTEM_ASSETS`, or from the vendored assets when that
     /// is unset. A missing asset ends the process (the vendored `exit(1)`).
+    /// SDL runs on its dummy video driver, so nothing shows on screen.
     pub fn new() -> VideoBeast {
+        VideoBeast::create(false)
+    }
+
+    /// As `new`, but SDL uses its usual video driver, so the VideoBeast's
+    /// window shows on screen (`--window`). If SDL cannot open the window
+    /// the vendored code logs and ends the process with exit code 1.
+    pub fn with_window() -> VideoBeast {
+        VideoBeast::create(true)
+    }
+
+    fn create(windowed: bool) -> VideoBeast {
         // A panic in another run (a failed test) must not block this one.
         let sdl_owner = SDL_OWNER.lock().unwrap_or_else(|e| e.into_inner());
         let dir = match std::env::var("BEASTEM_ASSETS") {
@@ -70,7 +85,7 @@ impl VideoBeast {
             _ => concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/beastem/assets").to_string(),
         };
         let dir = CString::new(dir).expect("asset path contains a NUL byte");
-        let handle = unsafe { vbshim_create(dir.as_ptr()) };
+        let handle = unsafe { vbshim_create(dir.as_ptr(), windowed as c_int) };
         let handle = NonNull::new(handle).expect("VideoBeast: SDL failed to start");
         VideoBeast { handle, next_tick_ps: 0, _sdl_owner: sdl_owner }
     }
@@ -98,6 +113,24 @@ impl VideoBeast {
     /// after time 0, while the counter still reads 0 from `init`.
     pub fn frame_count(&self) -> u64 {
         unsafe { vbshim_frame_count(self.handle.as_ptr()) }.saturating_sub(1)
+    }
+
+    /// Every beastem frame start so far, the first included. Unlike
+    /// `frame_count` it steps at the first frame start too.
+    pub fn frame_starts(&self) -> u64 {
+        unsafe { vbshim_frame_count(self.handle.as_ptr()) }
+    }
+
+    /// Drains SDL's event queue; true if it asked to quit or to close the
+    /// VideoBeast window. Also brings `key_down` up to date.
+    pub fn poll_quit(&mut self) -> bool {
+        unsafe { vbshim_poll(self.handle.as_ptr()) != 0 }
+    }
+
+    /// Whether the key at SDL scancode `scancode` was down at the last
+    /// `poll_quit`.
+    pub fn key_down(&self, scancode: i32) -> bool {
+        unsafe { vbshim_key_down(scancode as c_int) != 0 }
     }
 
     pub fn frame(&self) -> Option<Frame<'_>> {

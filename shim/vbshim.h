@@ -13,10 +13,14 @@ extern "C" {
 
 typedef struct vbshim vbshim;
 
-/* Start SDL with the dummy video driver, point the asset loader at
- * assets_dir and initialise a VideoBeast at time 0. The vendored code calls
- * exit(1) if an asset is missing or the window cannot be created. */
-vbshim  *vbshim_create(const char *assets_dir);
+/* Start SDL, point the asset loader at assets_dir and initialise a
+ * VideoBeast at time 0. With windowed 0, SDL is forced onto its dummy video
+ * driver; otherwise it picks its usual driver (SDL_VIDEODRIVER applies) and
+ * the VideoBeast's window shows on screen; if SDL fails to start, or can
+ * only offer a headless driver (offscreen, dummy) that the environment did
+ * not ask for, it logs and calls exit(1). The vendored code calls exit(1) if an asset is
+ * missing or the window cannot be created. */
+vbshim  *vbshim_create(const char *assets_dir, int windowed);
 void     vbshim_destroy(vbshim *h);
 
 /* Advance to ps, which must be the deadline returned by the previous call
@@ -34,6 +38,14 @@ uint64_t vbshim_frame_count(vbshim *h);
  * or NULL if there is no surface or it has another format. pitch is in bytes.
  * The pointer is valid until the next tick or write. */
 const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int *pitch);
+
+/* Drain SDL's event queue. Returns 1 if it held a quit request or a close
+ * of the VideoBeast window, else 0. */
+int      vbshim_poll(vbshim *h);
+
+/* 1 if the key at SDL scancode `scancode` was down as of the last
+ * vbshim_poll, else 0. */
+int      vbshim_key_down(int scancode);
 
 /* Side-effect-free views of VideoBeast state, for dumps. None of them goes
  * through VideoBeast::read, so none changes a register. */

@@ -26,6 +26,8 @@ use crate::videobeast::joy::JoyScript;
 use crate::videobeast::capture::{self, FrameList};
 #[cfg(feature = "videobeast")]
 use crate::videobeast::preload::Preload;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::window::{joy_bits, Pacer};
 
 // Welcome message
 const WELCOME: &str =
@@ -140,7 +142,10 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     .arg(Arg::with_name("vb_preload")
         .long("vb-preload")
         .value_name("LOADTXT")
-        .help("Before the program starts, loads the vXXXXX.vbm and vPB.vbp files listed in LOADTXT into VRAM and palettes, as SLIDE RV does"));
+        .help("Before the program starts, loads the vXXXXX.vbm and vPB.vbp files listed in LOADTXT into VRAM and palettes, as SLIDE RV does"))
+    .arg(Arg::with_name("window")
+        .long("window")
+        .help("Shows the VideoBeast in a window at real speed; arrows and Z/X/C drive port 0x9F unless --joy is given. Closing the window ends iz-cpm"));
 
     let matches = match command_line {
         None => app.get_matches_safe(),
@@ -201,6 +206,11 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             }
         },
     };
+    #[cfg(feature = "videobeast")]
+    let window = matches.is_present("window");
+    // With --joy the script drives port 0x9F and the keys are ignored.
+    #[cfg(feature = "videobeast")]
+    let keys_drive_joy = window && !matches.is_present("joy");
     #[cfg(feature = "videobeast")]
     let joy_script = match matches.value_of("joy") {
         None => JoyScript::default(),
@@ -266,12 +276,15 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         dump_at.frames().iter().chain(png_at.frames()).copied().collect();
     #[cfg(feature = "videobeast")]
     let mut last_frame: Option<u64> = None;
+    // --window: beastem's frame starts as of the last event poll.
+    #[cfg(feature = "videobeast")]
+    let mut polled_frame_starts: u64 = 0;
 
     // Init device
     let mut machine = CpmMachine::new();
     #[cfg(feature = "videobeast")]
     {
-        let mut videobeast = VideoBeast::new();
+        let mut videobeast = if window { VideoBeast::with_window() } else { VideoBeast::new() };
         preload.apply(&mut videobeast);
         machine.attach_videobeast(videobeast);
     }
@@ -489,6 +502,9 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     // Run the emulation
     cpu.registers().set_pc(binary_address);
     cpu.set_trace(cpu_trace);
+    // Emulated time 0 is now.
+    #[cfg(feature = "videobeast")]
+    let mut pacer = Pacer::new();
     let mut n = 0;
     let exit_code = loop {
         // Frames (AD-20): frame 0 starts as the .COM's first instruction is
@@ -529,6 +545,30 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         cpu.execute_instruction(&mut machine);
         #[cfg(feature = "videobeast")]
         machine.videobeast_catch_up(cpu.cycle_count() * PS_PER_T_STATE);
+
+        // --window: at each VideoBeast frame start, whether or not program
+        // frames have started, handle window events, sample the keys for the
+        // frame and hold emulated time to wall-clock time.
+        #[cfg(feature = "videobeast")]
+        if window {
+            let starts = machine.videobeast().map_or(0, |vb| vb.frame_starts());
+            if starts != polled_frame_starts {
+                polled_frame_starts = starts;
+                let vb = machine.videobeast_mut().expect("--window runs with a VideoBeast");
+                if vb.poll_quit() {
+                    match machine.current_frame() {
+                        Some(frame) => eprintln!("iz-cpm: window closed at frame {}", frame),
+                        None => eprintln!("iz-cpm: window closed at frame -"),
+                    }
+                    break EXIT_OK;
+                }
+                if keys_drive_joy {
+                    let bits = joy_bits(|scancode| vb.key_down(scancode));
+                    machine.set_live_joy(Some(bits));
+                }
+                pacer.wait_until(cpu.cycle_count() * PS_PER_T_STATE);
+            }
+        }
 
         #[cfg(feature = "videobeast")]
         if let Some(limit) = max_cycles {

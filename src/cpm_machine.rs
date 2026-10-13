@@ -73,6 +73,10 @@ pub struct CpmMachine {
     frame_base: Option<u64>,
     #[cfg(feature = "videobeast")]
     joy_script: JoyScript,
+    // `--window`: the keys held at the last frame start, which replace the
+    // script's value.
+    #[cfg(feature = "videobeast")]
+    live_joy: Option<u8>,
 }
 
 impl CpmMachine {
@@ -102,6 +106,8 @@ impl CpmMachine {
             frame_base: None,
             #[cfg(feature = "videobeast")]
             joy_script: JoyScript::default(),
+            #[cfg(feature = "videobeast")]
+            live_joy: None,
         }
     }
 
@@ -154,6 +160,14 @@ impl CpmMachine {
         self.joy_script = script;
     }
 
+    /// Sets the value port 0x9F reads from now on, in place of the script's
+    /// (`--window`); None goes back to the script. The port still reads
+    /// 0x00 before frames start.
+    #[cfg(feature = "videobeast")]
+    pub fn set_live_joy(&mut self, value: Option<u8>) {
+        self.live_joy = value;
+    }
+
     /// Starts frame 0 now, unless frames have already started. Call as the
     /// .COM's first instruction (PC 0x100) is about to run. Without a
     /// VideoBeast frames never start.
@@ -174,12 +188,12 @@ impl CpmMachine {
         }
     }
 
-    /// Port 0x9F: the joystick script's value for the current frame, 0x00
-    /// before frames start.
+    /// Port 0x9F: the live value if set, else the joystick script's value
+    /// for the current frame; 0x00 before frames start.
     #[cfg(feature = "videobeast")]
     fn joystick_read(&self) -> u8 {
         match self.current_frame() {
-            Some(frame) => self.joy_script.value_at(frame),
+            Some(frame) => self.live_joy.unwrap_or_else(|| self.joy_script.value_at(frame)),
             None => 0x00,
         }
     }
@@ -298,6 +312,11 @@ impl CpmMachine {
     #[cfg(feature = "videobeast")]
     pub fn videobeast(&self) -> Option<&VideoBeast> {
         self.videobeast.as_ref()
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast_mut(&mut self) -> Option<&mut VideoBeast> {
+        self.videobeast.as_mut()
     }
 
     /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page
@@ -554,6 +573,22 @@ mod tests {
         assert_eq!(m.port_in(0x9F), 0x00);
         m.start_frames();
         assert_eq!(m.current_frame(), Some(0));
+        assert_eq!(m.port_in(0x9F), 0x05);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn live_joystick_overrides_the_script_once_frames_start() {
+        let mut m = CpmMachine::new();
+        m.attach_videobeast(VideoBeast::new());
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        m.set_live_joy(Some(0x30));
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.start_frames();
+        assert_eq!(m.port_in(0x9F), 0x30);
+        m.set_live_joy(Some(0x00));
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.set_live_joy(None);
         assert_eq!(m.port_in(0x9F), 0x05);
     }
 

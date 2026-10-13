@@ -100,7 +100,7 @@ Successive triggers produce `snapshot.bin`, `snapshot.001.bin`, `snapshot.002.bi
 
 ## VideoBeast (feature `videobeast`)
 
-Building with `--features videobeast` attaches beastem's VideoBeast, vendored unmodified in `vendor/beastem/` (check with `cd vendor/beastem && sha256sum -c UPSTREAM`), to pages `0x40`–`0x5F`. It needs a C++ compiler, `pkg-config` and the SDL2 development files (`libsdl2-dev` on Debian/Ubuntu). SDL runs with its `dummy` video driver, so no display is needed; the VideoBeast's log lines go to stderr.
+Building with `--features videobeast` attaches beastem's VideoBeast, vendored unmodified in `vendor/beastem/` (check with `cd vendor/beastem && sha256sum -c UPSTREAM`), to pages `0x40`–`0x5F`. It needs a C++ compiler, `pkg-config` and the SDL2 development files (`libsdl2-dev` on Debian/Ubuntu). SDL runs with its `dummy` video driver, so no display is needed (unless `--window` is given, see "Window" below); the VideoBeast's log lines go to stderr.
 
 On Debian/Ubuntu:
 
@@ -129,6 +129,7 @@ Extra flags:
 - `--png-at LIST`: as each listed frame starts, write a PNG of the VideoBeast window to `--out`.
 - `--out DIR`: where `--dump-at` and `--png-at` write; created if missing. Needed whenever either list is given.
 - `--vb-preload LOADTXT`: before the program starts, load a SLIDE file set into VRAM and the palettes, as `SLIDE RV` does on hardware. See "Preloading VRAM and palettes" below.
+- `--window`: show the VideoBeast in a window and run at real speed, with the keyboard as the joystick. See "Window" below.
 
 Frames are numbered from the program: frame 0 starts as the first instruction at `0x100` is about to run, and frame n starts at the nth wrap of the VideoBeast line counter to 0 after that. In the start-up mode (`0x08`) a frame is 525 lines of 256 T-states, 134,400 T-states; the first wrap comes 256 T-states later than that, since the VideoBeast starts on its last line with the counter at 0. When running the CCP, frame 0 starts the first time a program starts at `0x100`; later programs do not restart the count. Until then `--frames` cannot end the run and port `0x9F` reads `0x00`.
 
@@ -146,7 +147,7 @@ The process exit code says how the run ended:
 
 | Code | End |
 |---|---|
-| 0 | Warm or cold boot, `--frames` reached, Ctrl-C Ctrl-C Y, `--help`, `--version` |
+| 0 | Warm or cold boot, `--frames` reached, `--window` closed, Ctrl-C Ctrl-C Y, `--help`, `--version` |
 | 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, bad `--vb-preload` set, capture file not written, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
 | 2 | `--max-cycles` reached |
 
@@ -185,6 +186,36 @@ VRAM, registers `0x00`-`0x7F` and the palette entries the asset files do not fil
 
 ```
 tests/artifacts/vb/golden.sh
+```
+
+#### Window
+
+`--window` lets a person watch and play a program. SDL uses its usual video driver (so `SDL_VIDEODRIVER` applies) and beastem's own 640x480 window shows the VideoBeast's output. The CP/M console stays on the terminal and stdout carries only the console, as without the flag. If SDL cannot open a window, for example with no display, iz-cpm logs the reason on stderr and exits with code 1. SDL's headless drivers count as no display unless asked for: `SDL_VIDEODRIVER=dummy` (as the tests use) runs `--window` without one, paced but unseen.
+
+Emulated time is held to wall-clock time at 8 MHz: at each VideoBeast frame start (about 60 a second) iz-cpm sleeps until wall time catches up with the emulated cycle count. It never runs faster than real time; a host too slow for 8 MHz simply runs slower.
+
+At each VideoBeast frame start iz-cpm also handles the window's events and samples the keyboard, by physical key position (SDL scancode). The keys held then set port `0x9F` for that frame, 1 = pressed:
+
+| Key | Bit | Meaning |
+|---|---|---|
+| Right | 0 | right |
+| Left | 1 | left |
+| Down | 2 | down |
+| Up | 3 | up |
+| Z | 4 | JUMP |
+| X | 5 | FIRE |
+| C | 7 | DASH |
+
+So a window session reads as a `--joy` script whose lines are the keys held at each frame start. Before frame 0 the port still reads `0x00`. With `--joy` as well, the script drives port `0x9F` and the keys are ignored: the window only displays, at real speed.
+
+This happens at every VideoBeast frame start, whether or not program frames have started, so the window stays responsive while the CCP runs. While a program waits for console input no instructions run, so the window does not update and does not respond until a key reaches the terminal.
+
+Closing the window ends iz-cpm with exit code 0 and `iz-cpm: window closed at frame N` on stderr (`-` for N before frame 0). The other flags work as without `--window`: `--frames`, `--dump-at`, `--png-at` and the rest work as usual, only paced to real time.
+
+`tests/artifacts/vb/JOYMOVE.COM` is a test program for it: a 4x4 marker in a black field that moves one pixel per frame per held direction and turns yellow with Z, cyan with X and white with C (green with none). It never exits; close the window to end it:
+
+```
+cargo run --features videobeast -- --window tests/artifacts/vb/JOYMOVE.COM
 ```
 
 #### Preloading VRAM and palettes
