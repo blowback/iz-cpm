@@ -8,7 +8,10 @@ const FLASH_BANKS: usize = 32;              // virtual banks 0..32
 const RAM_BANKS: usize = 32;                // virtual banks 32..64
 const FLASH_SIZE: usize = FLASH_BANKS * BANK_SIZE;
 const RAM_SIZE: usize = RAM_BANKS * BANK_SIZE;
-const BANK_MASK: u8 = 0x3F;                 // only the bottom 6 bits of a bank number are used
+const PAGE_TYPE_MASK: u8 = 0xE0;            // page & 0xE0 selects flash, RAM or VideoBeast (as beastem)
+const PAGE_BANK_MASK: u8 = 0x1F;            // page & 0x1F selects the bank within flash or RAM
+const PAGE_TYPE_RAM: u8 = 0x20;
+const PAGE_TYPE_VIDEOBEAST: u8 = 0x40;
 
 const PORT_BANK0: u8 = 0x70;
 const PORT_BANK3: u8 = 0x73;
@@ -17,6 +20,14 @@ const PORT_DUMP: u8 = 0x80;
 const DUMP_FLASH_ALL: u8 = 0x81;
 const DUMP_RAM_ALL: u8 = 0x82;
 const DUMP_ALL: u8 = 0x83;
+
+/// Where a CPU address lands after page translation; indices are into
+/// `flash` or `ram`.
+enum Target {
+    Flash(usize),
+    Ram(usize),
+    VideoBeast,
+}
 
 pub struct CpmMachine {
     flash: Vec<u8>,
@@ -109,17 +120,24 @@ impl CpmMachine {
         Ok(())
     }
 
-    fn virtual_bank(&self, address: u16) -> u8 {
+    fn decode(&self, address: u16) -> Target {
         let phys = (address >> 14) as usize;
-        if self.mapping_enabled {
-            self.bank_map[phys] & BANK_MASK
-        } else {
-            phys as u8
+        let offset = (address as usize) & (BANK_SIZE - 1);
+        if !self.mapping_enabled {
+            return Target::Flash(phys * BANK_SIZE + offset);
+        }
+        let page = self.bank_map[phys];
+        let bank = (page & PAGE_BANK_MASK) as usize;
+        match page & PAGE_TYPE_MASK {
+            PAGE_TYPE_RAM => Target::Ram(bank * BANK_SIZE + offset),
+            PAGE_TYPE_VIDEOBEAST => Target::VideoBeast,
+            _ => Target::Flash(bank * BANK_SIZE + offset),
         }
     }
 
     /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page
-    /// E (00-1F ROM, 20-3F RAM). Writes BOTH the hardware register (bank_map,
+    /// E (00-1F ROM, 20-3F RAM, 40-5F VideoBeast, all 8 bits kept; see
+    /// `decode`). Writes BOTH the hardware register (bank_map,
     /// used for address translation) AND the BIOS shadow — this is the blessed
     /// way to switch a page and the only way the shadow stays authoritative.
     /// Logical page 3 (the BIOS's own page) is not user-settable; ignored.
@@ -128,9 +146,8 @@ impl CpmMachine {
         if logical > 2 {
             return;
         }
-        let phys = physical & BANK_MASK;
-        self.bank_map[logical] = phys;
-        self.bios_shadow[logical] = phys;
+        self.bank_map[logical] = physical;
+        self.bios_shadow[logical] = physical;
     }
 
     /// MBB_GET_PAGE (BIOS 0xFDDC): return the physical page mapped to logical
@@ -148,23 +165,21 @@ impl CpmMachine {
 
 impl Machine for CpmMachine {
     fn peek(&mut self, address: u16) -> u8 {
-        let virt = self.virtual_bank(address) as usize;
-        let offset = (address as usize) & (BANK_SIZE - 1);
-        if virt < FLASH_BANKS {
-            self.flash[virt * BANK_SIZE + offset]
-        } else {
-            self.ram[(virt - FLASH_BANKS) * BANK_SIZE + offset]
+        match self.decode(address) {
+            Target::Flash(index) => self.flash[index],
+            Target::Ram(index) => self.ram[index],
+            // No VideoBeast attached: the bus floats high.
+            Target::VideoBeast => 0xFF,
         }
     }
 
     fn poke(&mut self, address: u16, value: u8) {
-        let virt = self.virtual_bank(address) as usize;
-        if virt < FLASH_BANKS {
-            // Flash ROM: writes are silently ignored.
-            return;
+        match self.decode(address) {
+            Target::Ram(index) => self.ram[index] = value,
+            // Flash ROM: writes are silently ignored. No VideoBeast attached:
+            // writes go nowhere.
+            Target::Flash(_) | Target::VideoBeast => {}
         }
-        let offset = (address as usize) & (BANK_SIZE - 1);
-        self.ram[(virt - FLASH_BANKS) * BANK_SIZE + offset] = value;
     }
 
     fn port_in(&mut self, address: u16) -> u8 {
@@ -189,7 +204,7 @@ impl Machine for CpmMachine {
         let port = address as u8;
         match port {
             PORT_BANK0..=PORT_BANK3 => {
-                self.bank_map[(port - PORT_BANK0) as usize] = value & BANK_MASK;
+                self.bank_map[(port - PORT_BANK0) as usize] = value;
             }
             PORT_MAP_ENABLE => {
                 self.mapping_enabled = (value & 1) != 0;
@@ -295,14 +310,62 @@ mod tests {
     }
 
     #[test]
-    fn bank_register_write_is_masked_to_six_bits() {
-        // The write is still masked to 6 bits even though it can't be read back.
+    fn pages_00_to_1f_select_flash() {
         let mut m = CpmMachine::new();
-        m.port_out(0x71, 0xFF);            // page register <- 0xFF, effective 0x3F (RAM bank 63)
-        m.poke(0x4000, 0xC7);              // write through logical page 1
-        let expected_offset = (0x3F - FLASH_BANKS) * BANK_SIZE; // RAM offset for bank 0x3F
-        assert_eq!(m.ram[expected_offset], 0xC7);
+        m.flash[0x1F * BANK_SIZE] = 0x5A;
+        m.port_out(0x71, 0x1F);
+        assert_eq!(m.peek(0x4000), 0x5A);
+        m.poke(0x4000, 0x00);              // flash is read-only
+        assert_eq!(m.flash[0x1F * BANK_SIZE], 0x5A);
+    }
+
+    #[test]
+    fn pages_20_to_3f_select_ram() {
+        let mut m = CpmMachine::new();
+        m.port_out(0x71, 0x3F);
+        m.poke(0x4000, 0xC7);
+        assert_eq!(m.ram[0x1F * BANK_SIZE], 0xC7);
         assert_eq!(m.peek(0x4000), 0xC7);
+    }
+
+    #[test]
+    fn pages_40_to_5f_select_videobeast_which_is_absent() {
+        // Page registers keep all 8 bits and decode by page & 0xE0, as in
+        // beastem. With no VideoBeast attached, reads float to 0xFF and
+        // writes reach neither RAM nor flash.
+        for page in [0x40, 0x45, 0x5F] {
+            let mut m = CpmMachine::new();
+            m.port_out(0x71, page);
+            assert_eq!(m.peek(0x4000), 0xFF, "page {:#04x}", page);
+            m.poke(0x4000, 0x12);
+            assert_eq!(m.peek(0x4000), 0xFF, "page {:#04x}", page);
+            assert!(m.ram.iter().all(|&b| b == 0), "page {:#04x} wrote RAM", page);
+            assert!(m.flash.iter().all(|&b| b == 0xFF), "page {:#04x} wrote flash", page);
+        }
+    }
+
+    #[test]
+    fn pages_60_to_ff_select_flash_by_low_five_bits() {
+        let mut m = CpmMachine::new();
+        m.flash[3 * BANK_SIZE] = 0x33;
+        m.flash[0x1F * BANK_SIZE] = 0x1F;
+        m.port_out(0x71, 0xA3);
+        assert_eq!(m.peek(0x4000), 0x33);
+        m.port_out(0x71, 0xFF);            // no longer masked to RAM bank 0x3F
+        assert_eq!(m.peek(0x4000), 0x1F);
+        m.poke(0x4000, 0x00);
+        assert_eq!(m.flash[0x1F * BANK_SIZE], 0x1F);
+        assert!(m.ram.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn mbb_set_page_keeps_videobeast_page() {
+        let mut m = CpmMachine::new();
+        m.mbb_set_page(1, 0x40);
+        assert_eq!(m.mbb_get_page(1), 0x40);
+        assert_eq!(m.peek(0x4000), 0xFF);
+        m.mbb_set_page(1, 0xFF);
+        assert_eq!(m.mbb_get_page(1), 0xFF, "shadow keeps all 8 bits");
     }
 
     #[test]

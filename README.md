@@ -4,14 +4,16 @@ This fork extends [iz-cpm](https://github.com/ivanizag/iz-cpm) with hardware fea
 
 ## Memory banking
 
-The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each physical bank can be remapped to any of 64 *physical* 16 KiB banks, giving 1 MiB of addressable memory:
+The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each physical bank can be remapped to a *physical* page: one of 32 Flash banks, 32 RAM banks (1 MiB in all), or the VideoBeast. Page values decode as on the hardware and in beastem, by `page & 0xE0`:
 
 | Physical bank range | Storage              |
 | ------------------ | -------------------- |
 | `0x00`–`0x1F`      | 512 KiB Flash ROM    |
 | `0x20`–`0x3F`      | 512 KiB RAM          |
+| `0x40`–`0x5F`      | VideoBeast (not attached yet: reads `0xFF`, writes ignored) |
+| `0x60`–`0xFF`      | Flash ROM, bank `page & 0x1F` |
 
-Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equivalent to writing `0x3F`.
+All 8 bits of a page value are kept, so writing `0xFF` selects Flash bank `0x1F`.
 
 ### The blessed way: BIOS page-mapping routines
 
@@ -19,7 +21,7 @@ Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equ
 
 | Routine        | Address  | Inputs                              | Output                                  |
 | -------------- | -------- | ----------------------------------- | --------------------------------------- |
-| `MBB_SET_PAGE` | `0xFDDF` | `A` = logical page (0–2), `E` = physical page (`0x00`–`0x3F`) | — |
+| `MBB_SET_PAGE` | `0xFDDF` | `A` = logical page (0–2), `E` = physical page (`0x00`–`0xFF`, see above) | — |
 | `MBB_GET_PAGE` | `0xFDDC` | `C` = logical page (0–2)            | `A` = physical page, or `0xFF` on error |
 
 
