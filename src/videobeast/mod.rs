@@ -6,6 +6,8 @@
 //! previous one is dropped, so parallel `run()` calls (integration tests in
 //! one binary) take turns instead of crashing inside SDL.
 
+pub mod joy;
+
 use std::ffi::{c_char, c_int, CString};
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard};
@@ -24,6 +26,7 @@ extern "C" {
     fn vbshim_tick(h: *mut VbShim, ps: u64) -> u64;
     fn vbshim_read(h: *mut VbShim, addr: u16, ps: u64) -> u8;
     fn vbshim_write(h: *mut VbShim, addr: u16, data: u8, ps: u64);
+    fn vbshim_frame_count(h: *mut VbShim) -> u64;
     fn vbshim_frame(h: *mut VbShim, width: *mut c_int, height: *mut c_int, pitch: *mut c_int) -> *const u32;
 }
 
@@ -80,6 +83,14 @@ impl VideoBeast {
         }
     }
 
+    /// Frame starts so far that wrapped the line counter to 0 (AD-20).
+    /// That is every beastem frame start but the first: `init` leaves the
+    /// VideoBeast on its last line, so its first frame start comes one line
+    /// after time 0, while the counter still reads 0 from `init`.
+    pub fn frame_count(&self) -> u64 {
+        unsafe { vbshim_frame_count(self.handle.as_ptr()) }.saturating_sub(1)
+    }
+
     #[allow(dead_code)] // read by the dump and PNG entries
     pub fn frame(&self) -> Option<Frame<'_>> {
         let (mut w, mut h, mut pitch): (c_int, c_int, c_int) = (0, 0, 0);
@@ -102,6 +113,23 @@ impl Drop for VideoBeast {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_count_steps_at_each_line_counter_wrap() {
+        let mut vb = VideoBeast::new();
+        let t = PS_PER_T_STATE;
+        // Start-up mode 0x08: frames of 525 lines x 256 T-states. beastem's
+        // first frame start, one line in, leaves the counter at 0.
+        let frame = 525 * 256;
+        vb.catch_up(256 * t);
+        assert_eq!(vb.frame_count(), 0);
+        vb.catch_up((256 + frame - 1) * t);
+        assert_eq!(vb.frame_count(), 0);
+        vb.catch_up((256 + frame) * t);
+        assert_eq!(vb.frame_count(), 1);
+        vb.catch_up((256 + 3 * frame) * t);
+        assert_eq!(vb.frame_count(), 3);
+    }
 
     #[test]
     fn frame_is_the_640x480_window_surface() {

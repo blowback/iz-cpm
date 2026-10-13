@@ -119,17 +119,31 @@ Emulated time is the Z80 cycle count at 8 MHz (125,000 ps per T-state). Start-up
 
 With the feature, stdout carries only the CP/M console. Every iz-cpm message (the banner, `-t`/`-T` call traces, `HALT instruction`, errors) and the VideoBeast's log lines go to stderr. The exception is `-z`/`--cpu-trace`: those lines come from the iz80 crate and stay on stdout.
 
-Two extra flags:
+Extra flags:
 
 - `--exit-on-warmboot`: when running the CCP (no program given), end iz-cpm when a program warm boots instead of reloading the CCP. A program given on the command line already ends iz-cpm when it warm boots.
 - `--max-cycles N`: end iz-cpm once the CPU has run N T-states (checked after each instruction), with a message on stderr.
+- `--frames N`: end iz-cpm as frame N starts, before any instruction of that frame runs, with `iz-cpm: frame N started (--frames N) at cycle C` on stderr. `--frames 0` runs no instruction of the program.
+- `--joy FILE`: a joystick script giving the value port `0x9F` reads in each frame. Without one the port reads `0x00`.
+
+Frames are numbered from the program: frame 0 starts as the first instruction at `0x100` is about to run, and frame n starts at the nth wrap of the VideoBeast line counter to 0 after that. In the start-up mode (`0x08`) a frame is 525 lines of 256 T-states, 134,400 T-states; the first wrap comes 256 T-states later than that, since the VideoBeast starts on its last line with the counter at 0. When running the CCP, frame 0 starts the first time a program starts at `0x100`; later programs do not restart the count. Until then `--frames` cannot end the run and port `0x9F` reads `0x00`.
+
+A joystick script has one line per change: a decimal frame number, one or more spaces, then `0x` and two hex digits (either case), the raw port bits. Blank lines are ignored and frame numbers must strictly increase. Each value takes effect as its frame starts and holds until the next line; before the first line the port reads `0x00`. An `IN` sees the frame in effect when the instruction starts. For example:
+
+```
+2 0x05
+4 0x81
+7 0x00
+```
+
+A script that cannot be read, or has a bad line, ends iz-cpm with exit code 1 before the CPU starts, naming the file and line on stderr, e.g. `iz-cpm: joy.txt:2: frame 1 is not after frame 2`.
 
 The process exit code says how the run ended:
 
 | Code | End |
 |---|---|
-| 0 | Warm or cold boot, Ctrl-C Ctrl-C Y, `--help`, `--version` |
-| 1 | Emulator error: bad arguments, missing file, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 0 | Warm or cold boot, `--frames` reached, Ctrl-C Ctrl-C Y, `--help`, `--version` |
+| 1 | Emulator error: bad arguments, missing file, bad joystick script, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
 | 2 | `--max-cycles` reached |
 
 The stock build keeps its output on stdout and always exits 0.

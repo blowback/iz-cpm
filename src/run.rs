@@ -20,6 +20,8 @@ use crate::terminal::Transparent;
 use crate::terminal_adm3a::Adm3aToAnsi;
 #[cfg(feature = "videobeast")]
 use crate::videobeast::{VideoBeast, PS_PER_T_STATE};
+#[cfg(feature = "videobeast")]
+use crate::videobeast::joy::JoyScript;
 
 // Welcome message
 const WELCOME: &str =
@@ -110,7 +112,15 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     .arg(Arg::with_name("max_cycles")
         .long("max-cycles")
         .value_name("N")
-        .help("Ends iz-cpm with exit code 2 once the CPU has run N T-states"));
+        .help("Ends iz-cpm with exit code 2 once the CPU has run N T-states"))
+    .arg(Arg::with_name("frames")
+        .long("frames")
+        .value_name("N")
+        .help("Ends iz-cpm as frame N starts; frame 0 starts with the program at 0x100"))
+    .arg(Arg::with_name("joy")
+        .long("joy")
+        .value_name("FILE")
+        .help("Joystick script for port 0x9F: lines of <frame> 0xNN"));
 
     let matches = match command_line {
         None => app.get_matches_safe(),
@@ -160,10 +170,35 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         },
     };
 
+    #[cfg(feature = "videobeast")]
+    let frames: Option<u64> = match matches.value_of("frames") {
+        None => None,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("Invalid --frames value \"{}\": expected a whole number of frames.", text);
+                return EXIT_ERROR;
+            }
+        },
+    };
+    #[cfg(feature = "videobeast")]
+    let joy_script = match matches.value_of("joy") {
+        None => JoyScript::default(),
+        Some(path) => match JoyScript::load(std::path::Path::new(path)) {
+            Ok(script) => script,
+            Err(err) => {
+                eprintln!("{}", err);
+                return EXIT_ERROR;
+            }
+        },
+    };
+
     // Init device
     let mut machine = CpmMachine::new();
     #[cfg(feature = "videobeast")]
     machine.attach_videobeast(VideoBeast::new());
+    #[cfg(feature = "videobeast")]
+    machine.set_joy_script(joy_script);
     if let Some(path) = dump_basename {
         machine.set_dump_basename(std::path::PathBuf::from(path));
     }
@@ -378,6 +413,22 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     cpu.set_trace(cpu_trace);
     let mut n = 0;
     let exit_code = loop {
+        // Frames (AD-20): frame 0 starts as the .COM's first instruction is
+        // about to run; later entries at 0x100 (CCP mode) do not restart it.
+        // Checked before the instruction, so no instruction of frame N runs.
+        #[cfg(feature = "videobeast")]
+        {
+            if cpu.registers().pc() == TPA_BASE_ADDRESS {
+                machine.start_frames();
+            }
+            if let (Some(limit), Some(frame)) = (frames, machine.current_frame()) {
+                if frame >= limit {
+                    eprintln!("iz-cpm: frame {} started (--frames {}) at cycle {}", frame, limit, cpu.cycle_count());
+                    break EXIT_OK;
+                }
+            }
+        }
+
         // VideoBeast accesses are stamped with the time the instruction
         // starts; the catch-up after the previous instruction already brought
         // the VideoBeast to that time, so its clock never goes backwards.

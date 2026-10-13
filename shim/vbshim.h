@@ -27,6 +27,9 @@ uint64_t vbshim_tick(vbshim *h, uint64_t ps);
 uint8_t  vbshim_read(vbshim *h, uint16_t addr, uint64_t ps);
 void     vbshim_write(vbshim *h, uint16_t addr, uint8_t data, uint64_t ps);
 
+/* Number of frame starts the VideoBeast has run (beastem's frameCount). */
+uint64_t vbshim_frame_count(vbshim *h);
+
 /* Pixels of the window surface (32 bits per pixel), or NULL. pitch is in
  * bytes. The pointer is valid until the next tick or write. */
 const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int *pitch);

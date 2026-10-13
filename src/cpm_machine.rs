@@ -7,6 +7,8 @@ use iz80::Machine;
 use crate::constants::FIRMWARE_CONSOLE_BYTE;
 #[cfg(feature = "videobeast")]
 use crate::videobeast::VideoBeast;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::joy::JoyScript;
 
 const BANK_SIZE: usize = 0x4000;            // 16 KiB
 const FLASH_BANKS: usize = 32;              // virtual banks 0..32
@@ -25,6 +27,8 @@ const PORT_DUMP: u8 = 0x80;
 const DUMP_FLASH_ALL: u8 = 0x81;
 const DUMP_RAM_ALL: u8 = 0x82;
 const DUMP_ALL: u8 = 0x83;
+#[cfg(feature = "videobeast")]
+const PORT_JOYSTICK: u8 = 0x9F;
 
 /// Where a CPU address lands after page translation; indices are into
 /// `flash` or `ram`, the VideoBeast offset is within its 16 KB window.
@@ -63,6 +67,12 @@ pub struct CpmMachine {
     // reaching RAM byte FIRMWARE_CONSOLE_BYTE are dropped.
     #[cfg(feature = "videobeast")]
     firmware_byte_guarded: bool,
+    // The VideoBeast's frame count when frame 0 started (AD-20); None until
+    // the .COM starts.
+    #[cfg(feature = "videobeast")]
+    frame_base: Option<u64>,
+    #[cfg(feature = "videobeast")]
+    joy_script: JoyScript,
 }
 
 impl CpmMachine {
@@ -88,6 +98,10 @@ impl CpmMachine {
             videobeast: None,
             #[cfg(feature = "videobeast")]
             firmware_byte_guarded: false,
+            #[cfg(feature = "videobeast")]
+            frame_base: None,
+            #[cfg(feature = "videobeast")]
+            joy_script: JoyScript::default(),
         }
     }
 
@@ -132,6 +146,41 @@ impl CpmMachine {
     pub fn videobeast_catch_up(&mut self, now_ps: u64) {
         if let Some(vb) = &mut self.videobeast {
             vb.catch_up(now_ps);
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn set_joy_script(&mut self, script: JoyScript) {
+        self.joy_script = script;
+    }
+
+    /// Starts frame 0 now, unless frames have already started. Call as the
+    /// .COM's first instruction (PC 0x100) is about to run. Without a
+    /// VideoBeast frames never start.
+    #[cfg(feature = "videobeast")]
+    pub fn start_frames(&mut self) {
+        if self.frame_base.is_none() {
+            self.frame_base = self.videobeast.as_ref().map(|vb| vb.frame_count());
+        }
+    }
+
+    /// The frame in effect now (the VideoBeast has been caught up to the
+    /// start of the next instruction), or None before frames start.
+    #[cfg(feature = "videobeast")]
+    pub fn current_frame(&self) -> Option<u64> {
+        match (self.frame_base, &self.videobeast) {
+            (Some(base), Some(vb)) => Some(vb.frame_count() - base),
+            _ => None,
+        }
+    }
+
+    /// Port 0x9F: the joystick script's value for the current frame, 0x00
+    /// before frames start.
+    #[cfg(feature = "videobeast")]
+    fn joystick_read(&self) -> u8 {
+        match self.current_frame() {
+            Some(frame) => self.joy_script.value_at(frame),
+            None => 0x00,
         }
     }
 
@@ -287,6 +336,8 @@ impl Machine for CpmMachine {
             // the mapping, never IN on these ports.
             PORT_BANK0..=PORT_BANK3 => port,
             PORT_MAP_ENABLE => self.mapping_enabled as u8,
+            #[cfg(feature = "videobeast")]
+            PORT_JOYSTICK => self.joystick_read(),
             _ => {
                 let value = self.in_values[port as usize];
                 self.in_port = Some(port);
@@ -437,6 +488,33 @@ mod tests {
             assert!(m.ram.iter().all(|&b| b == 0), "page {:#04x} wrote RAM", page);
             assert!(m.flash.iter().all(|&b| b == 0xFF), "page {:#04x} wrote flash", page);
         }
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn joystick_reads_0_before_frames_start() {
+        let mut m = CpmMachine::new();
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+        // No VideoBeast attached: frames never start.
+        m.start_frames();
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn joystick_reads_0_until_frames_start_with_videobeast_attached() {
+        // The CCP case: a VideoBeast is attached but no .COM has started.
+        let mut m = CpmMachine::new();
+        m.attach_videobeast(VideoBeast::new());
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.start_frames();
+        assert_eq!(m.current_frame(), Some(0));
+        assert_eq!(m.port_in(0x9F), 0x05);
     }
 
     #[test]

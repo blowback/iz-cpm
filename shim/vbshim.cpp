@@ -7,6 +7,20 @@
 #include "../vendor/beastem/assets.hpp"
 #include "../vendor/beastem/videobeast.hpp"
 
+// VideoBeast::frameCount is private and vendor/beastem/ stays unedited.
+// Access checks do not apply to the names in an explicit instantiation, so
+// instantiating FrameCountAccess with &VideoBeast::frameCount is allowed, and
+// its friend function hands the member pointer out.
+template <typename Tag, typename Tag::type Member>
+struct FrameCountAccess {
+    friend typename Tag::type member_of(Tag) { return Member; }
+};
+struct FrameCountTag {
+    typedef uint64_t VideoBeast::*type;
+    friend type member_of(FrameCountTag);
+};
+template struct FrameCountAccess<FrameCountTag, &VideoBeast::frameCount>;
+
 struct vbshim {
     VideoBeast *vb;
     Uint32 window_id;
@@ -68,6 +82,10 @@ extern "C" uint8_t vbshim_read(vbshim *h, uint16_t addr, uint64_t ps) {
 
 extern "C" void vbshim_write(vbshim *h, uint16_t addr, uint8_t data, uint64_t ps) {
     h->vb->write(addr, data, ps);
+}
+
+extern "C" uint64_t vbshim_frame_count(vbshim *h) {
+    return h->vb->*member_of(FrameCountTag());
 }
 
 extern "C" const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int *pitch) {
