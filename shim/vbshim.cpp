@@ -1,7 +1,9 @@
 // C ABI over the vendored beastem VideoBeast. See vbshim.h.
 #include "vbshim.h"
 
+#include <cstdlib>
 #include <iostream>
+#include <new>
 
 #include "SDL.h"
 #include "../vendor/beastem/assets.hpp"
@@ -52,8 +54,16 @@ extern "C" vbshim *vbshim_create(const char *assets_dir) {
 
     initAssetPath(assets_dir);
 
+    // The constructor leaves VRAM, the registers below 0x80 and the palette
+    // entries the asset files do not fill uninitialised. Build the
+    // VideoBeast in zeroed storage so they start as 0 on every run.
+    void *storage = std::calloc(1, sizeof(VideoBeast));
+    if (storage == nullptr) {
+        std::cerr << "vbshim: out of memory for the VideoBeast" << std::endl;
+        return nullptr;
+    }
     vbshim *h = new vbshim;
-    h->vb = new VideoBeast(1.0f);
+    h->vb = new (storage) VideoBeast(1.0f);
     h->vb->init(0, 0);
     h->window_id = newest_window_id();
     return h;
@@ -64,7 +74,8 @@ extern "C" void vbshim_destroy(vbshim *h) {
         return;
     }
     SDL_Window *window = SDL_GetWindowFromID(h->window_id);
-    delete h->vb;
+    h->vb->~VideoBeast();
+    std::free(h->vb);
     if (window != nullptr) {
         SDL_DestroyWindow(window);
     }
@@ -94,11 +105,23 @@ extern "C" const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int 
         return nullptr;
     }
     SDL_Surface *surface = SDL_GetWindowSurface(window);
-    if (surface == nullptr || surface->format->BytesPerPixel != 4) {
+    if (surface == nullptr || surface->format->format != SDL_PIXELFORMAT_RGB888) {
         return nullptr;
     }
     *width = surface->w;
     *height = surface->h;
     *pitch = surface->pitch;
     return static_cast<const uint32_t *>(surface->pixels);
+}
+
+extern "C" const uint8_t *vbshim_vram(vbshim *h) {
+    return h->vb->memoryPtr();
+}
+
+extern "C" uint8_t vbshim_read_register(vbshim *h, uint8_t r) {
+    return h->vb->readRegister(r);
+}
+
+extern "C" uint8_t vbshim_read_palette(vbshim *h, int palette, uint16_t byte) {
+    return h->vb->readPalette(palette, byte);
 }

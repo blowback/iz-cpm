@@ -30,9 +30,24 @@ void     vbshim_write(vbshim *h, uint16_t addr, uint8_t data, uint64_t ps);
 /* Number of frame starts the VideoBeast has run (beastem's frameCount). */
 uint64_t vbshim_frame_count(vbshim *h);
 
-/* Pixels of the window surface (32 bits per pixel), or NULL. pitch is in
- * bytes. The pointer is valid until the next tick or write. */
+/* Pixels of the window surface, 0x00RRGGBB per pixel (SDL_PIXELFORMAT_RGB888),
+ * or NULL if there is no surface or it has another format. pitch is in bytes.
+ * The pointer is valid until the next tick or write. */
 const uint32_t *vbshim_frame(vbshim *h, int *width, int *height, int *pitch);
+
+/* Side-effect-free views of VideoBeast state, for dumps. None of them goes
+ * through VideoBeast::read, so none changes a register. */
+
+/* The 1 MiB of VRAM, by address. Valid until vbshim_destroy. */
+const uint8_t *vbshim_vram(vbshim *h);
+
+/* Register r as stored. 0xFA/0xFB (line counter) and 0xE4-0xE7 (multiply
+ * product) hold their values as of the last unlocked CPU read of a register
+ * 0x80-0xFD, not live values. */
+uint8_t  vbshim_read_register(vbshim *h, uint8_t r);
+
+/* Palette 1 or 2: entry byte >> 1, low byte for even byte, high for odd. */
+uint8_t  vbshim_read_palette(vbshim *h, int palette, uint16_t byte);
 
 #ifdef __cplusplus
 }

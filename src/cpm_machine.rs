@@ -276,6 +276,30 @@ impl CpmMachine {
         }
     }
 
+    /// The 64K the CPU sees through the current page registers, read
+    /// without side effects; addresses on a VideoBeast page give 0xFF.
+    #[cfg(feature = "videobeast")]
+    pub fn cpu_view(&self) -> Vec<u8> {
+        (0..=0xFFFFu16)
+            .map(|address| match self.decode(address) {
+                Target::Flash(index) => self.flash[index],
+                Target::Ram(index) => self.ram[index],
+                Target::VideoBeast(_) => 0xFF,
+            })
+            .collect()
+    }
+
+    /// RAM pages 0x20-0x3F, in order.
+    #[cfg(feature = "videobeast")]
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast(&self) -> Option<&VideoBeast> {
+        self.videobeast.as_ref()
+    }
+
     /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page
     /// E (00-1F ROM, 20-3F RAM, 40-5F VideoBeast, all 8 bits kept; see
     /// `decode`). Writes BOTH the hardware register (bank_map,
@@ -488,6 +512,22 @@ mod tests {
             assert!(m.ram.iter().all(|&b| b == 0), "page {:#04x} wrote RAM", page);
             assert!(m.flash.iter().all(|&b| b == 0xFF), "page {:#04x} wrote flash", page);
         }
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn cpu_view_reads_0xff_on_a_videobeast_page_and_ram_elsewhere() {
+        let mut m = CpmMachine::new();
+        for (i, b) in m.ram.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        m.mbb_set_page(2, 0x40);
+        let view = m.cpu_view();
+        assert_eq!(view.len(), 0x10000);
+        assert_eq!(&view[0x0000..0x8000], &m.ram[0x0000..0x8000]);
+        assert!(view[0x8000..0xC000].iter().all(|&b| b == 0xFF));
+        assert_eq!(&view[0xC000..], &m.ram[0xC000..0x10000]);
+        assert_eq!(m.ram().len(), RAM_SIZE);
     }
 
     #[cfg(feature = "videobeast")]

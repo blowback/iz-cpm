@@ -6,6 +6,7 @@
 //! previous one is dropped, so parallel `run()` calls (integration tests in
 //! one binary) take turns instead of crashing inside SDL.
 
+pub mod capture;
 pub mod joy;
 
 use std::ffi::{c_char, c_int, CString};
@@ -28,11 +29,16 @@ extern "C" {
     fn vbshim_write(h: *mut VbShim, addr: u16, data: u8, ps: u64);
     fn vbshim_frame_count(h: *mut VbShim) -> u64;
     fn vbshim_frame(h: *mut VbShim, width: *mut c_int, height: *mut c_int, pitch: *mut c_int) -> *const u32;
+    fn vbshim_vram(h: *mut VbShim) -> *const u8;
+    fn vbshim_read_register(h: *mut VbShim, r: u8) -> u8;
+    fn vbshim_read_palette(h: *mut VbShim, palette: c_int, byte: u16) -> u8;
 }
 
+/// Bytes of VRAM.
+pub const VRAM_SIZE: usize = 1 << 20;
+
 /// The window surface: `pixels` holds `height` rows of `pitch / 4` words,
-/// of which the first `width` are visible.
-#[allow(dead_code)] // read by the dump and PNG entries
+/// of which the first `width` are visible. Each word is `0x00RRGGBB`.
 pub struct Frame<'a> {
     pub width: usize,
     pub height: usize,
@@ -91,7 +97,6 @@ impl VideoBeast {
         unsafe { vbshim_frame_count(self.handle.as_ptr()) }.saturating_sub(1)
     }
 
-    #[allow(dead_code)] // read by the dump and PNG entries
     pub fn frame(&self) -> Option<Frame<'_>> {
         let (mut w, mut h, mut pitch): (c_int, c_int, c_int) = (0, 0, 0);
         let ptr = unsafe { vbshim_frame(self.handle.as_ptr(), &mut w, &mut h, &mut pitch) };
@@ -101,6 +106,28 @@ impl VideoBeast {
         let (w, h, pitch) = (w as usize, h as usize, pitch as usize);
         let pixels = unsafe { std::slice::from_raw_parts(ptr, pitch / 4 * h) };
         Some(Frame { width: w, height: h, pitch, pixels })
+    }
+}
+
+impl VideoBeast {
+    /// The 1 MiB of VRAM, by address. Has no effect on the VideoBeast.
+    pub fn vram(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(vbshim_vram(self.handle.as_ptr()), VRAM_SIZE) }
+    }
+
+    /// Register `r` as stored, without the side effects of a CPU read.
+    /// 0xFA/0xFB (line counter) and 0xE4-0xE7 (multiply product) hold their
+    /// values as of the last unlocked CPU read of a register 0x80-0xFD, not
+    /// live values.
+    pub fn register(&self, r: u8) -> u8 {
+        unsafe { vbshim_read_register(self.handle.as_ptr(), r) }
+    }
+
+    /// Byte `byte` (0-511) of palette 1 or 2: entry `byte >> 1`, low byte
+    /// when even, high when odd.
+    pub fn palette_byte(&self, palette: u8, byte: u16) -> u8 {
+        assert!(palette == 1 || palette == 2, "palette {}", palette);
+        unsafe { vbshim_read_palette(self.handle.as_ptr(), palette as c_int, byte) }
     }
 }
 

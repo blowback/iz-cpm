@@ -125,6 +125,9 @@ Extra flags:
 - `--max-cycles N`: end iz-cpm once the CPU has run N T-states (checked after each instruction), with a message on stderr.
 - `--frames N`: end iz-cpm as frame N starts, before any instruction of that frame runs, with `iz-cpm: frame N started (--frames N) at cycle C` on stderr. `--frames 0` runs no instruction of the program.
 - `--joy FILE`: a joystick script giving the value port `0x9F` reads in each frame. Without one the port reads `0x00`.
+- `--dump-at LIST`: as each listed frame starts, write the VideoBeast's VRAM, registers and both palettes, the Z80's 64K view and the RAM banks to `--out`.
+- `--png-at LIST`: as each listed frame starts, write a PNG of the VideoBeast window to `--out`.
+- `--out DIR`: where `--dump-at` and `--png-at` write; created if missing. Needed whenever either list is given.
 
 Frames are numbered from the program: frame 0 starts as the first instruction at `0x100` is about to run, and frame n starts at the nth wrap of the VideoBeast line counter to 0 after that. In the start-up mode (`0x08`) a frame is 525 lines of 256 T-states, 134,400 T-states; the first wrap comes 256 T-states later than that, since the VideoBeast starts on its last line with the counter at 0. When running the CCP, frame 0 starts the first time a program starts at `0x100`; later programs do not restart the count. Until then `--frames` cannot end the run and port `0x9F` reads `0x00`.
 
@@ -143,7 +146,7 @@ The process exit code says how the run ended:
 | Code | End |
 |---|---|
 | 0 | Warm or cold boot, `--frames` reached, Ctrl-C Ctrl-C Y, `--help`, `--version` |
-| 1 | Emulator error: bad arguments, missing file, bad joystick script, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, capture file not written, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
 | 2 | `--max-cycles` reached |
 
 The stock build keeps its output on stdout and always exits 0.
@@ -154,6 +157,33 @@ Test programs under `tests/artifacts/vb/` are committed as `.COM` files next to 
 
 ```
 tests/artifacts/vb/build.sh
+```
+
+#### Dumps and PNGs
+
+A `LIST` is comma-separated decimal frame numbers with no spaces, e.g. `0,2,10`; repeats are allowed, empty items are not. A bad `LIST`, a list without `--out`, or an `--out` that is not a directory and cannot be created ends iz-cpm with exit code 1 before the CPU starts.
+
+Captures for a frame happen as it starts, before its first instruction and before the `--frames` check, so `--frames N --png-at N` writes frame N. Frame 0's are taken before the program's first instruction runs. A listed frame the run never reaches writes nothing, logs `iz-cpm: frame N not reached; nothing written for it` on stderr, and leaves the exit code as it would be without the flag. A file that cannot be written ends iz-cpm with exit code 1. Captures read VideoBeast state without side effects, so they never change what the program sees, and the same binary, assets, program and joystick script give byte-identical files.
+
+Files, with `NNNNN` the frame in decimal, at least 5 digits:
+
+| File | Bytes | Content |
+|---|---|---|
+| `fNNNNN-vram.bin` | 1,048,576 | VRAM by address |
+| `fNNNNN-regs.bin` | 256 | register r at offset r, as stored: `0xFA`/`0xFB` (line counter) and `0xE4`-`0xE7` (multiply product) hold their values as of the program's last unlocked read of a register `0x80`-`0xFD`, not live values |
+| `fNNNNN-pal1.bin`, `fNNNNN-pal2.bin` | 512 | palette 1 or 2: entry i at 2i (low byte) and 2i+1 (high byte) |
+| `fNNNNN-z80.bin` | 65,536 | what the CPU sees through the current page registers; addresses on a VideoBeast page read `0xFF` |
+| `fNNNNN-ram.bin` | 524,288 | RAM pages `0x20`-`0x3F` in order |
+| `fNNNNN.png` | varies | the VideoBeast window surface, 8-bit RGB, no chunks but IHDR, IDAT and IEND |
+
+The window surface at frame n's start holds the picture scanned during frame n-1; frame 0's is the start-up background. The PNG is the size of the surface, 640x480 in mode 0, pixel-doubled modes included.
+
+VRAM, registers `0x00`-`0x7F` and the palette entries the asset files do not fill start at 0.
+
+`tests/artifacts/vb/golden/` holds committed outputs of two cases (listed in `tests/artifacts/vb/golden.sh`), and `cargo test --features videobeast` checks a fresh run matches them byte for byte. After re-vendoring beastem, or changing the capture code, regenerate them, review `git diff --stat tests/artifacts/vb/golden` and commit:
+
+```
+tests/artifacts/vb/golden.sh
 ```
 
 ---

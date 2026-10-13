@@ -11,7 +11,7 @@ path = "src/bin/main.rs"
 [features]
 # Attach beastem's VideoBeast (vendor/beastem, via shim/) to page 0x40.
 # Needs a C++ compiler and SDL2 development files.
-videobeast = ["dep:cc"]
+videobeast = ["dep:cc", "dep:png"]
 
 [build-dependencies]
 cc = { version = "1.8.0", optional = true }
@@ -20,6 +20,7 @@ cc = { version = "1.8.0", optional = true }
 iz80 = "0.5.1"
 #iz80 = {path = "../iz80"}
 clap = "^2"
+png = { version = "0.18.1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 crossterm = "^0.24"

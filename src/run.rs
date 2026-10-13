@@ -22,6 +22,8 @@ use crate::terminal_adm3a::Adm3aToAnsi;
 use crate::videobeast::{VideoBeast, PS_PER_T_STATE};
 #[cfg(feature = "videobeast")]
 use crate::videobeast::joy::JoyScript;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::capture::{self, FrameList};
 
 // Welcome message
 const WELCOME: &str =
@@ -120,7 +122,19 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     .arg(Arg::with_name("joy")
         .long("joy")
         .value_name("FILE")
-        .help("Joystick script for port 0x9F: lines of <frame> 0xNN"));
+        .help("Joystick script for port 0x9F: lines of <frame> 0xNN"))
+    .arg(Arg::with_name("dump_at")
+        .long("dump-at")
+        .value_name("LIST")
+        .help("Writes VRAM, VideoBeast registers and palettes, the Z80 64K view and RAM to --out as each listed frame starts (e.g. 0,2)"))
+    .arg(Arg::with_name("png_at")
+        .long("png-at")
+        .value_name("LIST")
+        .help("Writes a PNG of the VideoBeast window to --out as each listed frame starts"))
+    .arg(Arg::with_name("out")
+        .long("out")
+        .value_name("DIR")
+        .help("Directory for --dump-at and --png-at files; created if missing"));
 
     let matches = match command_line {
         None => app.get_matches_safe(),
@@ -192,6 +206,49 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             }
         },
     };
+
+    #[cfg(feature = "videobeast")]
+    let (dump_at, png_at) = {
+        let parse = |name: &str, flag: &str| match matches.value_of(name) {
+            None => Ok(FrameList::default()),
+            Some(text) => FrameList::parse(flag, text),
+        };
+        match (parse("dump_at", "--dump-at"), parse("png_at", "--png-at")) {
+            (Ok(dump_at), Ok(png_at)) => (dump_at, png_at),
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("{}", err);
+                return EXIT_ERROR;
+            }
+        }
+    };
+    #[cfg(feature = "videobeast")]
+    let out_dir: Option<std::path::PathBuf> = match matches.value_of("out") {
+        None => {
+            if !dump_at.is_empty() || !png_at.is_empty() {
+                eprintln!("iz-cpm: --dump-at and --png-at need --out DIR to say where the files go");
+                return EXIT_ERROR;
+            }
+            None
+        }
+        Some(path) => {
+            let dir = std::path::PathBuf::from(path);
+            if dir.exists() && !dir.is_dir() {
+                eprintln!("iz-cpm: --out {}: not a directory", path);
+                return EXIT_ERROR;
+            }
+            if let Err(err) = fs::create_dir_all(&dir) {
+                eprintln!("iz-cpm: --out {}: {}", path, err);
+                return EXIT_ERROR;
+            }
+            Some(dir)
+        }
+    };
+    // Listed frames not yet captured, in order.
+    #[cfg(feature = "videobeast")]
+    let mut pending_captures: std::collections::BTreeSet<u64> =
+        dump_at.frames().iter().chain(png_at.frames()).copied().collect();
+    #[cfg(feature = "videobeast")]
+    let mut last_frame: Option<u64> = None;
 
     // Init device
     let mut machine = CpmMachine::new();
@@ -421,6 +478,20 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             if cpu.registers().pc() == TPA_BASE_ADDRESS {
                 machine.start_frames();
             }
+            // Captures for frame n come before the --frames check, so
+            // `--frames N --png-at N` writes frame N.
+            let frame_now = machine.current_frame();
+            if frame_now.is_some() && frame_now != last_frame {
+                last_frame = frame_now;
+                let frame = frame_now.unwrap();
+                if pending_captures.remove(&frame) {
+                    let dir = out_dir.as_deref().expect("--out is checked before the run");
+                    if let Err(err) = capture_frame(&machine, dir, frame, dump_at.contains(frame), png_at.contains(frame)) {
+                        eprintln!("{}", err);
+                        break EXIT_ERROR;
+                    }
+                }
+            }
             if let (Some(limit), Some(frame)) = (frames, machine.current_frame()) {
                 if frame >= limit {
                     eprintln!("iz-cpm: frame {} started (--frames {}) at cycle {}", frame, limit, cpu.cycle_count());
@@ -547,5 +618,22 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             }
         }
     };
+    #[cfg(feature = "videobeast")]
+    for frame in pending_captures {
+        eprintln!("iz-cpm: frame {} not reached; nothing written for it", frame);
+    }
     exit_code
+}
+
+/// Writes frame `frame`'s dumps and/or PNG to `dir` (`--dump-at`, `--png-at`).
+#[cfg(feature = "videobeast")]
+fn capture_frame(machine: &CpmMachine, dir: &std::path::Path, frame: u64, dump: bool, png: bool) -> Result<(), String> {
+    let vb = machine.videobeast().expect("frames only start with a VideoBeast attached");
+    if dump {
+        capture::write_dumps(dir, frame, vb, &machine.cpu_view(), machine.ram())?;
+    }
+    if png {
+        capture::write_png(dir, frame, vb)?;
+    }
+    Ok(())
 }
