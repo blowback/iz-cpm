@@ -11,6 +11,9 @@ const STDIN_FD: i32 = 0;
 pub struct Console {
     initial_termios: Option<Termios>,
     next_char: Option<u8>,
+    // Set when a blocking read finds stdin at end of file.
+    #[cfg(feature = "videobeast")]
+    input_ended: bool,
 }
 
 impl Console {
@@ -21,6 +24,8 @@ impl Console {
         let c = Console {
             initial_termios,
             next_char: None,
+            #[cfg(feature = "videobeast")]
+            input_ended: false,
         };
 
         c.setup_host_terminal(false);
@@ -35,6 +40,28 @@ impl Console {
             initial.c_cc[VTIME] = 0;
             tcsetattr(STDIN_FD, TCSANOW, &initial).unwrap();
         }
+    }
+
+    #[cfg(not(feature = "videobeast"))]
+    fn read_blocking(&mut self) -> u8 {
+        let mut buf = [0];
+        stdin().read_exact(&mut buf).unwrap();
+        buf[0]
+    }
+
+    // At end of file, records that input has ended and returns a carriage
+    // return, which ends a BDOS line read without being echoed; the run loop
+    // then ends the run.
+    #[cfg(feature = "videobeast")]
+    fn read_blocking(&mut self) -> u8 {
+        let mut buf = [0];
+        let result = stdin().read_exact(&mut buf);
+        if matches!(&result, Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof) {
+            self.input_ended = true;
+            return b'\r';
+        }
+        result.unwrap();
+        buf[0]
     }
 }
 
@@ -66,12 +93,16 @@ impl ConsoleEmulator for Console {
             None => {
                 // Blocks waiting for char
                 self.setup_host_terminal(true);
-                let mut buf = [0];
-                stdin().read_exact(&mut buf).unwrap();
+                let ch = self.read_blocking();
                 self.setup_host_terminal(false);
-                buf[0]
+                ch
             }
         }
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn input_ended(&self) -> bool {
+        self.input_ended
     }
 
     fn put(&mut self, sequence: Option<String>) {

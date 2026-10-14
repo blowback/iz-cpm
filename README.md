@@ -4,14 +4,16 @@ This fork extends [iz-cpm](https://github.com/ivanizag/iz-cpm) with hardware fea
 
 ## Memory banking
 
-The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each physical bank can be remapped to any of 64 *physical* 16 KiB banks, giving 1 MiB of addressable memory:
+The CPU's 64 KiB address space is divided into four 16 KiB *logical* banks. Each physical bank can be remapped to a *physical* page: one of 32 Flash banks, 32 RAM banks (1 MiB in all), or the VideoBeast. Page values decode as on the hardware and in beastem, by `page & 0xE0`:
 
 | Physical bank range | Storage              |
 | ------------------ | -------------------- |
 | `0x00`–`0x1F`      | 512 KiB Flash ROM    |
 | `0x20`–`0x3F`      | 512 KiB RAM          |
+| `0x40`–`0x5F`      | VideoBeast with feature `videobeast`; otherwise reads `0xFF`, writes ignored |
+| `0x60`–`0xFF`      | Flash ROM, bank `page & 0x1F` |
 
-Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equivalent to writing `0x3F`.
+All 8 bits of a page value are kept, so writing `0xFF` selects Flash bank `0x1F`.
 
 ### The blessed way: BIOS page-mapping routines
 
@@ -19,7 +21,7 @@ Only the bottom 6 bits of a bank-select value are used, so writing `0xFF` is equ
 
 | Routine        | Address  | Inputs                              | Output                                  |
 | -------------- | -------- | ----------------------------------- | --------------------------------------- |
-| `MBB_SET_PAGE` | `0xFDDF` | `A` = logical page (0–2), `E` = physical page (`0x00`–`0x3F`) | — |
+| `MBB_SET_PAGE` | `0xFDDF` | `A` = logical page (0–2), `E` = physical page (`0x00`–`0xFF`, see above) | — |
 | `MBB_GET_PAGE` | `0xFDDC` | `C` = logical page (0–2)            | `A` = physical page, or `0xFF` on error |
 
 
@@ -95,6 +97,149 @@ iz-cpm --dump snapshot.bin myprogram.com
 ```
 
 Successive triggers produce `snapshot.bin`, `snapshot.001.bin`, `snapshot.002.bin`, …
+
+## VideoBeast (feature `videobeast`)
+
+Building with `--features videobeast` attaches beastem's VideoBeast, vendored unmodified in `vendor/beastem/` (check with `cd vendor/beastem && sha256sum -c UPSTREAM`), to pages `0x40`–`0x5F`. It needs a C++ compiler, `pkg-config` and the SDL2 development files (`libsdl2-dev` on Debian/Ubuntu). SDL runs with its `dummy` video driver, so no display is needed (unless `--window` is given, see "Window" below); the VideoBeast's log lines go to stderr.
+
+On Debian/Ubuntu:
+
+```
+sudo apt-get update
+sudo apt-get install -y libsdl2-dev pkg-config g++
+cargo build --features videobeast
+cargo test --features videobeast
+```
+
+CI runs this as the `videobeast` job in `.github/workflows/rust.yml`, beside the stock build.
+
+Emulated time is the Z80 cycle count at 8 MHz (125,000 ps per T-state). Start-up registers and palettes come from `$BEASTEM_ASSETS`, or from `vendor/beastem/assets` when it is unset. Only one VideoBeast exists per process at a time.
+
+### Scripted runs
+
+With the feature, stdout carries only the CP/M console. Every iz-cpm message (the banner, `-t`/`-T` call traces, `HALT instruction`, errors) and the VideoBeast's log lines go to stderr. The exception is `-z`/`--cpu-trace`: those lines come from the iz80 crate and stay on stdout.
+
+Extra flags:
+
+- `--exit-on-warmboot`: when running the CCP (no program given), end iz-cpm when a program warm boots instead of reloading the CCP. A program given on the command line already ends iz-cpm when it warm boots.
+- `--max-cycles N`: end iz-cpm once the CPU has run N T-states (checked after each instruction), with a message on stderr.
+- `--frames N`: end iz-cpm as frame N starts, before any instruction of that frame runs, with `iz-cpm: frame N started (--frames N) at cycle C` on stderr. `--frames 0` runs no instruction of the program.
+- `--joy FILE`: a joystick script giving the value port `0x9F` reads in each frame. Without one the port reads `0x00`.
+- `--dump-at LIST`: as each listed frame starts, write the VideoBeast's VRAM, registers and both palettes, the Z80's 64K view and the RAM banks to `--out`.
+- `--png-at LIST`: as each listed frame starts, write a PNG of the VideoBeast window to `--out`.
+- `--out DIR`: where `--dump-at` and `--png-at` write; created if missing. Needed whenever either list is given.
+- `--vb-preload LOADTXT`: before the program starts, load a SLIDE file set into VRAM and the palettes, as `SLIDE RV` does on hardware. See "Preloading VRAM and palettes" below.
+- `--window`: show the VideoBeast in a window and run at real speed, with the keyboard as the joystick. See "Window" below.
+
+Frames are numbered from the program: frame 0 starts as the first instruction at `0x100` is about to run, and frame n starts at the nth wrap of the VideoBeast line counter to 0 after that. In the start-up mode (`0x08`) a frame is 525 lines of 256 T-states, 134,400 T-states; the first wrap comes 256 T-states later than that, since the VideoBeast starts on its last line with the counter at 0. When running the CCP, frame 0 starts the first time a program starts at `0x100`; later programs do not restart the count. Until then `--frames` cannot end the run and port `0x9F` reads `0x00`.
+
+A joystick script has one line per change: a decimal frame number, one or more spaces, then `0x` and two hex digits (either case), the raw port bits. Blank lines are ignored and frame numbers must strictly increase. Each value takes effect as its frame starts and holds until the next line; before the first line the port reads `0x00`. An `IN` sees the frame in effect when the instruction starts. For example:
+
+```
+2 0x05
+4 0x81
+7 0x00
+```
+
+A script that cannot be read, or has a bad line, ends iz-cpm with exit code 1 before the CPU starts, naming the file and line on stderr, e.g. `iz-cpm: joy.txt:2: frame 1 is not after frame 2`.
+
+The process exit code says how the run ended:
+
+| Code | End |
+|---|---|
+| 0 | Warm or cold boot, `--frames` reached, `--window` closed, Ctrl-C Ctrl-C Y, `--help`, `--version` |
+| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, bad `--vb-preload` set, missing beastem asset, `--window` cannot open, capture file not written, console input ended (Unix), program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 2 | `--max-cycles` reached |
+
+On Unix, if the console waits for a key and stdin is at end of file, for example piped input that ran out before the program warm booted, iz-cpm logs `iz-cpm: console input ended` on stderr and exits with code 1.
+
+The stock build keeps its output on stdout and exits 0, except that on Unix it panics when the console waits for a key and stdin is at end of file.
+
+The MicroBeast firmware console byte `0xFF2B` (screen_page) lies inside iz-cpm's BIOS jump table, so once the BIOS is set up, writes that reach that RAM byte, from the program or from iz-cpm itself, are ignored, and each one is logged on stderr. A program reads back the jump table's value (`0x8E`). Writes reach it normally when page 3 is mapped elsewhere.
+
+Test programs under `tests/artifacts/vb/` are committed as `.COM` files next to their source; `cargo test` never assembles them. After editing a source, rebuild with sjasmplus 1.24.0 (or set `$SJASMPLUS`) and commit both:
+
+```
+tests/artifacts/vb/build.sh
+```
+
+#### Dumps and PNGs
+
+A `LIST` is comma-separated decimal frame numbers with no spaces, e.g. `0,2,10`; repeats are allowed, empty items are not. A bad `LIST`, a list without `--out`, or an `--out` that is not a directory and cannot be created ends iz-cpm with exit code 1 before the CPU starts.
+
+Captures for a frame happen as it starts, before its first instruction and before the `--frames` check, so `--frames N --png-at N` writes frame N. Frame 0's are taken before the program's first instruction runs. A listed frame the run never reaches writes nothing, logs `iz-cpm: frame N not reached; nothing written for it` on stderr, and leaves the exit code as it would be without the flag. A file that cannot be written ends iz-cpm with exit code 1. Captures read VideoBeast state without side effects, so they never change what the program sees, and the same binary, assets, program and joystick script give byte-identical files.
+
+Files, with `NNNNN` the frame in decimal, at least 5 digits:
+
+| File | Bytes | Content |
+|---|---|---|
+| `fNNNNN-vram.bin` | 1,048,576 | VRAM by address |
+| `fNNNNN-regs.bin` | 256 | register r at offset r, as stored: `0xFA`/`0xFB` (line counter) and `0xE4`-`0xE7` (multiply product) hold their values as of the program's last unlocked read of a register `0x80`-`0xFD`, not live values |
+| `fNNNNN-pal1.bin`, `fNNNNN-pal2.bin` | 512 | palette 1 or 2: entry i at 2i (low byte) and 2i+1 (high byte) |
+| `fNNNNN-z80.bin` | 65,536 | what the CPU sees through the current page registers; addresses on a VideoBeast page read `0xFF` |
+| `fNNNNN-ram.bin` | 524,288 | RAM pages `0x20`-`0x3F` in order |
+| `fNNNNN.png` | varies | the VideoBeast window surface, 8-bit RGB, no chunks but IHDR, IDAT and IEND |
+
+The window surface at frame n's start holds the picture scanned during frame n-1; frame 0's is the start-up background. The PNG is the size of the surface, 640x480 in mode 0, pixel-doubled modes included.
+
+VRAM, registers `0x00`-`0x7F` and the palette entries the asset files do not fill start at 0.
+
+`tests/artifacts/vb/golden/` holds committed outputs of two cases (listed in `tests/artifacts/vb/golden.sh`), and `cargo test --features videobeast` checks a fresh run matches them byte for byte. After re-vendoring beastem, or changing the capture code, regenerate them, review `git diff --stat tests/artifacts/vb/golden` and commit:
+
+```
+tests/artifacts/vb/golden.sh
+```
+
+#### Window
+
+`--window` lets a person watch and play a program. SDL uses its usual video driver (so `SDL_VIDEODRIVER` applies) and beastem's own 640x480 window shows the VideoBeast's output. The CP/M console stays on the terminal and stdout carries only the console, as without the flag. If SDL cannot open a window, for example with no display, iz-cpm logs the reason on stderr and exits with code 1. SDL's headless drivers count as no display unless asked for: `SDL_VIDEODRIVER=dummy` (as the tests use) runs `--window` without one, paced but unseen.
+
+Emulated time is held to wall-clock time at 8 MHz: at each VideoBeast frame start (about 60 a second) iz-cpm sleeps until wall time catches up with the emulated cycle count. It never runs faster than real time; a host too slow for 8 MHz simply runs slower.
+
+At each VideoBeast frame start iz-cpm also handles the window's events and samples the keyboard, by physical key position (SDL scancode). The keys held then set port `0x9F` for that frame, 1 = pressed:
+
+| Key | Bit | Meaning |
+|---|---|---|
+| Right | 0 | right |
+| Left | 1 | left |
+| Down | 2 | down |
+| Up | 3 | up |
+| Z | 4 | JUMP |
+| X | 5 | FIRE |
+| C | 7 | DASH |
+
+So a window session reads as a `--joy` script whose lines are the keys held at each frame start. Before frame 0 the port still reads `0x00`. With `--joy` as well, the script drives port `0x9F` and the keys are ignored: the window only displays, at real speed.
+
+This happens at every VideoBeast frame start, whether or not program frames have started, so the window stays responsive while the CCP runs. While a program waits for console input no instructions run, so the window does not update and does not respond until a key reaches the terminal.
+
+Closing the window ends iz-cpm with exit code 0 and `iz-cpm: window closed at frame N` on stderr (`-` for N before frame 0). The other flags work as without `--window`: `--frames`, `--dump-at`, `--png-at` and the rest work as usual, only paced to real time.
+
+`tests/artifacts/vb/JOYMOVE.COM` is a test program for it: a 4x4 marker in a black field that moves one pixel per frame per held direction and turns yellow with Z, cyan with X and white with C (green with none). It never exits; close the window to end it:
+
+```
+cargo run --features videobeast -- --window tests/artifacts/vb/JOYMOVE.COM
+```
+
+#### Preloading VRAM and palettes
+
+`--vb-preload LOADTXT` names a text file listing one path per line, relative to the directory holding it. Blank lines are skipped and trailing whitespace (including `\r`) is trimmed. The file name of each path decides what happens, by SLIDE's rules (case does not matter):
+
+- `vXXXXX.vbm`, `v` and exactly five hex digits: the file's bytes go to VRAM from address `0xXXXXX`.
+- `vPB.vbp`, `P` in `0`-`1` and `B` in `0`-`3`: the file loads palette `P` (`0` is palette 1, `1` palette 2) from bank `B` upward, 128 bytes (64 entries) per bank, even byte low. Loading stops after bank 3; the rest of the file is dropped.
+- Any other name is ignored, with a line on stderr naming the `LOADTXT` path as given, the line and the listed path, e.g. `iz-cpm: set/load.txt:3: ignoring tools/GAME.COM (not a SLIDE VRAM or palette name)`. Ignored files are not read.
+
+For example:
+
+```
+v20000.vbm
+sprites/v40000.vbm
+v00.vbp
+v10.vbp
+```
+
+Files apply in listed order, so where two overlap the later one wins. Bytes are written as they are, with no `0x1A` stripping and no padding. The preload is applied before frame 0's captures, so `--dump-at 0` shows it. It changes VRAM and palette contents only: every register is as it would be without `--vb-preload`. On hardware SLIDE leaves register `0xF5` at its last palette select; iz-cpm does not.
+
+A `load.txt` that cannot be read, a listed file that cannot be read, or a `.vbm` whose address plus length is past `0x100000` ends iz-cpm with exit code 1 before the CPU starts. The stderr line names the `load.txt` path, and for a listed file also the line and the listed path, e.g. `iz-cpm: set/load.txt: No such file or directory (os error 2)` or `iz-cpm: set/load.txt:2: vFFF80.vbm: 256 bytes at 0xFFF80 run past the top of VRAM`. (SLIDE on hardware writes the earlier files before it gives up on an overrunning one; iz-cpm refuses the whole set first.)
 
 ---
 

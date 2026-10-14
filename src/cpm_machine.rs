@@ -3,12 +3,22 @@ use std::path::{Path, PathBuf};
 
 use iz80::Machine;
 
+#[cfg(feature = "videobeast")]
+use crate::constants::FIRMWARE_CONSOLE_BYTE;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::VideoBeast;
+#[cfg(feature = "videobeast")]
+use crate::videobeast::joy::JoyScript;
+
 const BANK_SIZE: usize = 0x4000;            // 16 KiB
 const FLASH_BANKS: usize = 32;              // virtual banks 0..32
 const RAM_BANKS: usize = 32;                // virtual banks 32..64
 const FLASH_SIZE: usize = FLASH_BANKS * BANK_SIZE;
 const RAM_SIZE: usize = RAM_BANKS * BANK_SIZE;
-const BANK_MASK: u8 = 0x3F;                 // only the bottom 6 bits of a bank number are used
+const PAGE_TYPE_MASK: u8 = 0xE0;            // page & 0xE0 selects flash, RAM or VideoBeast (as beastem)
+const PAGE_BANK_MASK: u8 = 0x1F;            // page & 0x1F selects the bank within flash or RAM
+const PAGE_TYPE_RAM: u8 = 0x20;
+const PAGE_TYPE_VIDEOBEAST: u8 = 0x40;
 
 const PORT_BANK0: u8 = 0x70;
 const PORT_BANK3: u8 = 0x73;
@@ -17,6 +27,16 @@ const PORT_DUMP: u8 = 0x80;
 const DUMP_FLASH_ALL: u8 = 0x81;
 const DUMP_RAM_ALL: u8 = 0x82;
 const DUMP_ALL: u8 = 0x83;
+#[cfg(feature = "videobeast")]
+const PORT_JOYSTICK: u8 = 0x9F;
+
+/// Where a CPU address lands after page translation; indices are into
+/// `flash` or `ram`, the VideoBeast offset is within its 16 KB window.
+enum Target {
+    Flash(usize),
+    Ram(usize),
+    VideoBeast(u16),
+}
 
 pub struct CpmMachine {
     flash: Vec<u8>,
@@ -35,6 +55,31 @@ pub struct CpmMachine {
     in_port: Option<u8>,
     out_port: Option<u8>,
     out_value: u8,
+    #[cfg(feature = "videobeast")]
+    vb: VideoBeastState,
+}
+
+/// The machine's VideoBeast, frame and joystick state (feature
+/// `videobeast`).
+#[cfg(feature = "videobeast")]
+#[derive(Default)]
+struct VideoBeastState {
+    // Emulated time at which the current instruction started; VideoBeast
+    // accesses are stamped with it.
+    instr_start_ps: u64,
+    // Attached by `run()`, never by `new()`: unit tests build machines in
+    // parallel threads and must not each start SDL.
+    videobeast: Option<VideoBeast>,
+    // Set by `run()` after the BIOS table is written: from then on writes
+    // reaching RAM byte FIRMWARE_CONSOLE_BYTE are dropped.
+    firmware_byte_guarded: bool,
+    // The VideoBeast's frame count when frame 0 started (AD-20); None until
+    // the .COM starts.
+    frame_base: Option<u64>,
+    joy_script: JoyScript,
+    // `--window`: the keys held at the last frame start, which replace the
+    // script's value.
+    live_joy: Option<u8>,
 }
 
 impl CpmMachine {
@@ -54,8 +99,122 @@ impl CpmMachine {
             in_port: None,
             out_port: None,
             out_value: 0,
+            #[cfg(feature = "videobeast")]
+            vb: VideoBeastState::default(),
         }
     }
+
+    #[cfg(feature = "videobeast")]
+    pub fn attach_videobeast(&mut self, videobeast: VideoBeast) {
+        self.vb.videobeast = Some(videobeast);
+    }
+
+    /// From now on, drop writes whose target is the RAM byte at
+    /// FIRMWARE_CONSOLE_BYTE (the reset mapping puts it at CPU 0xFF2B). A
+    /// program storing the firmware console byte would otherwise overwrite
+    /// the fake BIOS jump table. Call after `Bios::setup`.
+    #[cfg(feature = "videobeast")]
+    pub fn guard_firmware_byte(&mut self) {
+        self.vb.firmware_byte_guarded = true;
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn firmware_byte_write_ignored(&self, index: usize, value: u8) -> bool {
+        if self.vb.firmware_byte_guarded && index == FIRMWARE_CONSOLE_BYTE as usize {
+            eprintln!(
+                "iz-cpm: ignored write of 0x{:02X} to 0x{:04X} (firmware console byte)",
+                value, FIRMWARE_CONSOLE_BYTE
+            );
+            return true;
+        }
+        false
+    }
+
+    #[cfg(not(feature = "videobeast"))]
+    fn firmware_byte_write_ignored(&self, _index: usize, _value: u8) -> bool {
+        false
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn set_instr_start_ps(&mut self, ps: u64) {
+        self.vb.instr_start_ps = ps;
+    }
+
+    /// Brings the attached VideoBeast up to `now_ps`.
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast_catch_up(&mut self, now_ps: u64) {
+        if let Some(vb) = &mut self.vb.videobeast {
+            vb.catch_up(now_ps);
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn set_joy_script(&mut self, script: JoyScript) {
+        self.vb.joy_script = script;
+    }
+
+    /// Sets the value port 0x9F reads from now on, in place of the script's
+    /// (`--window`); None goes back to the script. The port still reads
+    /// 0x00 before frames start.
+    #[cfg(feature = "videobeast")]
+    pub fn set_live_joy(&mut self, value: Option<u8>) {
+        self.vb.live_joy = value;
+    }
+
+    /// Starts frame 0 now, unless frames have already started. Call as the
+    /// .COM's first instruction (PC 0x100) is about to run. Without a
+    /// VideoBeast frames never start.
+    #[cfg(feature = "videobeast")]
+    pub fn start_frames(&mut self) {
+        if self.vb.frame_base.is_none() {
+            self.vb.frame_base = self.vb.videobeast.as_ref().map(|vb| vb.frame_count());
+        }
+    }
+
+    /// The frame in effect now (the VideoBeast has been caught up to the
+    /// start of the next instruction), or None before frames start.
+    #[cfg(feature = "videobeast")]
+    pub fn current_frame(&self) -> Option<u64> {
+        match (self.vb.frame_base, &self.vb.videobeast) {
+            (Some(base), Some(vb)) => Some(vb.frame_count() - base),
+            _ => None,
+        }
+    }
+
+    /// Port 0x9F: the live value if set, else the joystick script's value
+    /// for the current frame; 0x00 before frames start.
+    #[cfg(feature = "videobeast")]
+    fn joystick_read(&self) -> u8 {
+        match self.current_frame() {
+            Some(frame) => self.vb.live_joy.unwrap_or_else(|| self.vb.joy_script.value_at(frame)),
+            None => 0x00,
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn videobeast_read(&mut self, offset: u16) -> u8 {
+        match &mut self.vb.videobeast {
+            Some(vb) => vb.read(offset, self.vb.instr_start_ps),
+            None => 0xFF,
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    fn videobeast_write(&mut self, offset: u16, value: u8) {
+        if let Some(vb) = &mut self.vb.videobeast {
+            vb.write(offset, value, self.vb.instr_start_ps);
+        }
+    }
+
+    // No VideoBeast attached: the bus floats high.
+    #[cfg(not(feature = "videobeast"))]
+    fn videobeast_read(&mut self, _offset: u16) -> u8 {
+        0xFF
+    }
+
+    // No VideoBeast attached: writes go nowhere.
+    #[cfg(not(feature = "videobeast"))]
+    fn videobeast_write(&mut self, _offset: u16, _value: u8) {}
 
     pub fn set_dump_basename(&mut self, path: PathBuf) {
         self.dump_basename = Some(path);
@@ -109,17 +268,53 @@ impl CpmMachine {
         Ok(())
     }
 
-    fn virtual_bank(&self, address: u16) -> u8 {
+    fn decode(&self, address: u16) -> Target {
         let phys = (address >> 14) as usize;
-        if self.mapping_enabled {
-            self.bank_map[phys] & BANK_MASK
-        } else {
-            phys as u8
+        let offset = (address as usize) & (BANK_SIZE - 1);
+        if !self.mapping_enabled {
+            return Target::Flash(phys * BANK_SIZE + offset);
+        }
+        let page = self.bank_map[phys];
+        let bank = (page & PAGE_BANK_MASK) as usize;
+        match page & PAGE_TYPE_MASK {
+            PAGE_TYPE_RAM => Target::Ram(bank * BANK_SIZE + offset),
+            PAGE_TYPE_VIDEOBEAST => Target::VideoBeast(offset as u16),
+            _ => Target::Flash(bank * BANK_SIZE + offset),
         }
     }
 
+    /// The 64K the CPU sees through the current page registers, read
+    /// without side effects; addresses on a VideoBeast page give 0xFF.
+    #[cfg(feature = "videobeast")]
+    pub fn cpu_view(&self) -> Vec<u8> {
+        (0..=0xFFFFu16)
+            .map(|address| match self.decode(address) {
+                Target::Flash(index) => self.flash[index],
+                Target::Ram(index) => self.ram[index],
+                Target::VideoBeast(_) => 0xFF,
+            })
+            .collect()
+    }
+
+    /// RAM pages 0x20-0x3F, in order.
+    #[cfg(feature = "videobeast")]
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast(&self) -> Option<&VideoBeast> {
+        self.vb.videobeast.as_ref()
+    }
+
+    #[cfg(feature = "videobeast")]
+    pub fn videobeast_mut(&mut self) -> Option<&mut VideoBeast> {
+        self.vb.videobeast.as_mut()
+    }
+
     /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page
-    /// E (00-1F ROM, 20-3F RAM). Writes BOTH the hardware register (bank_map,
+    /// E (00-1F ROM, 20-3F RAM, 40-5F VideoBeast, all 8 bits kept; see
+    /// `decode`). Writes BOTH the hardware register (bank_map,
     /// used for address translation) AND the BIOS shadow — this is the blessed
     /// way to switch a page and the only way the shadow stays authoritative.
     /// Logical page 3 (the BIOS's own page) is not user-settable; ignored.
@@ -128,9 +323,8 @@ impl CpmMachine {
         if logical > 2 {
             return;
         }
-        let phys = physical & BANK_MASK;
-        self.bank_map[logical] = phys;
-        self.bios_shadow[logical] = phys;
+        self.bank_map[logical] = physical;
+        self.bios_shadow[logical] = physical;
     }
 
     /// MBB_GET_PAGE (BIOS 0xFDDC): return the physical page mapped to logical
@@ -147,24 +341,25 @@ impl CpmMachine {
 }
 
 impl Machine for CpmMachine {
-    fn peek(&self, address: u16) -> u8 {
-        let virt = self.virtual_bank(address) as usize;
-        let offset = (address as usize) & (BANK_SIZE - 1);
-        if virt < FLASH_BANKS {
-            self.flash[virt * BANK_SIZE + offset]
-        } else {
-            self.ram[(virt - FLASH_BANKS) * BANK_SIZE + offset]
+    fn peek(&mut self, address: u16) -> u8 {
+        match self.decode(address) {
+            Target::Flash(index) => self.flash[index],
+            Target::Ram(index) => self.ram[index],
+            Target::VideoBeast(offset) => self.videobeast_read(offset),
         }
     }
 
     fn poke(&mut self, address: u16, value: u8) {
-        let virt = self.virtual_bank(address) as usize;
-        if virt < FLASH_BANKS {
+        match self.decode(address) {
+            Target::Ram(index) => {
+                if !self.firmware_byte_write_ignored(index, value) {
+                    self.ram[index] = value;
+                }
+            }
+            Target::VideoBeast(offset) => self.videobeast_write(offset, value),
             // Flash ROM: writes are silently ignored.
-            return;
+            Target::Flash(_) => {}
         }
-        let offset = (address as usize) & (BANK_SIZE - 1);
-        self.ram[(virt - FLASH_BANKS) * BANK_SIZE + offset] = value;
     }
 
     fn port_in(&mut self, address: u16) -> u8 {
@@ -177,6 +372,8 @@ impl Machine for CpmMachine {
             // the mapping, never IN on these ports.
             PORT_BANK0..=PORT_BANK3 => port,
             PORT_MAP_ENABLE => self.mapping_enabled as u8,
+            #[cfg(feature = "videobeast")]
+            PORT_JOYSTICK => self.joystick_read(),
             _ => {
                 let value = self.in_values[port as usize];
                 self.in_port = Some(port);
@@ -189,7 +386,7 @@ impl Machine for CpmMachine {
         let port = address as u8;
         match port {
             PORT_BANK0..=PORT_BANK3 => {
-                self.bank_map[(port - PORT_BANK0) as usize] = value & BANK_MASK;
+                self.bank_map[(port - PORT_BANK0) as usize] = value;
             }
             PORT_MAP_ENABLE => {
                 self.mapping_enabled = (value & 1) != 0;
@@ -295,14 +492,121 @@ mod tests {
     }
 
     #[test]
-    fn bank_register_write_is_masked_to_six_bits() {
-        // The write is still masked to 6 bits even though it can't be read back.
+    fn pages_00_to_1f_select_flash() {
         let mut m = CpmMachine::new();
-        m.port_out(0x71, 0xFF);            // page register <- 0xFF, effective 0x3F (RAM bank 63)
-        m.poke(0x4000, 0xC7);              // write through logical page 1
-        let expected_offset = (0x3F - FLASH_BANKS) * BANK_SIZE; // RAM offset for bank 0x3F
-        assert_eq!(m.ram[expected_offset], 0xC7);
+        m.flash[0x1F * BANK_SIZE] = 0x5A;
+        m.port_out(0x71, 0x1F);
+        assert_eq!(m.peek(0x4000), 0x5A);
+        m.poke(0x4000, 0x00);              // flash is read-only
+        assert_eq!(m.flash[0x1F * BANK_SIZE], 0x5A);
+    }
+
+    #[test]
+    fn pages_20_to_3f_select_ram() {
+        let mut m = CpmMachine::new();
+        m.port_out(0x71, 0x3F);
+        m.poke(0x4000, 0xC7);
+        assert_eq!(m.ram[0x1F * BANK_SIZE], 0xC7);
         assert_eq!(m.peek(0x4000), 0xC7);
+    }
+
+    #[test]
+    fn pages_40_to_5f_select_videobeast_which_is_absent() {
+        // Page registers keep all 8 bits and decode by page & 0xE0, as in
+        // beastem. With no VideoBeast attached, reads float to 0xFF and
+        // writes reach neither RAM nor flash.
+        for page in [0x40, 0x45, 0x5F] {
+            let mut m = CpmMachine::new();
+            m.port_out(0x71, page);
+            assert_eq!(m.peek(0x4000), 0xFF, "page {:#04x}", page);
+            m.poke(0x4000, 0x12);
+            assert_eq!(m.peek(0x4000), 0xFF, "page {:#04x}", page);
+            assert!(m.ram.iter().all(|&b| b == 0), "page {:#04x} wrote RAM", page);
+            assert!(m.flash.iter().all(|&b| b == 0xFF), "page {:#04x} wrote flash", page);
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn cpu_view_reads_0xff_on_a_videobeast_page_and_ram_elsewhere() {
+        let mut m = CpmMachine::new();
+        for (i, b) in m.ram.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        m.mbb_set_page(2, 0x40);
+        let view = m.cpu_view();
+        assert_eq!(view.len(), 0x10000);
+        assert_eq!(&view[0x0000..0x8000], &m.ram[0x0000..0x8000]);
+        assert!(view[0x8000..0xC000].iter().all(|&b| b == 0xFF));
+        assert_eq!(&view[0xC000..], &m.ram[0xC000..0x10000]);
+        assert_eq!(m.ram().len(), RAM_SIZE);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn joystick_reads_0_before_frames_start() {
+        let mut m = CpmMachine::new();
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+        // No VideoBeast attached: frames never start.
+        m.start_frames();
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn joystick_reads_0_until_frames_start_with_videobeast_attached() {
+        // The CCP case: a VideoBeast is attached but no .COM has started.
+        let mut m = CpmMachine::new();
+        m.attach_videobeast(VideoBeast::new());
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        assert_eq!(m.current_frame(), None);
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.start_frames();
+        assert_eq!(m.current_frame(), Some(0));
+        assert_eq!(m.port_in(0x9F), 0x05);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn live_joystick_overrides_the_script_once_frames_start() {
+        let mut m = CpmMachine::new();
+        m.attach_videobeast(VideoBeast::new());
+        m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
+        m.set_live_joy(Some(0x30));
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.start_frames();
+        assert_eq!(m.port_in(0x9F), 0x30);
+        m.set_live_joy(Some(0x00));
+        assert_eq!(m.port_in(0x9F), 0x00);
+        m.set_live_joy(None);
+        assert_eq!(m.port_in(0x9F), 0x05);
+    }
+
+    #[test]
+    fn pages_60_to_ff_select_flash_by_low_five_bits() {
+        let mut m = CpmMachine::new();
+        m.flash[3 * BANK_SIZE] = 0x33;
+        m.flash[0x1F * BANK_SIZE] = 0x1F;
+        m.port_out(0x71, 0xA3);
+        assert_eq!(m.peek(0x4000), 0x33);
+        m.port_out(0x71, 0xFF);            // no longer masked to RAM bank 0x3F
+        assert_eq!(m.peek(0x4000), 0x1F);
+        m.poke(0x4000, 0x00);
+        assert_eq!(m.flash[0x1F * BANK_SIZE], 0x1F);
+        assert!(m.ram.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn mbb_set_page_keeps_videobeast_page() {
+        let mut m = CpmMachine::new();
+        m.mbb_set_page(1, 0x40);
+        assert_eq!(m.mbb_get_page(1), 0x40);
+        assert_eq!(m.peek(0x4000), 0xFF);
+        m.mbb_set_page(1, 0xFF);
+        assert_eq!(m.mbb_get_page(1), 0xFF, "shadow keeps all 8 bits");
     }
 
     #[test]
@@ -529,5 +833,78 @@ mod tests {
         assert_eq!(m.out_value, 0x99);
         let _ = m.port_in(0x20);
         assert_eq!(m.in_port, Some(0x20));
+    }
+
+    #[test]
+    fn ldir_takes_21_t_states_per_repeat_and_16_on_the_last() {
+        // VideoBeast raster timing is derived from the cycle count, so block
+        // moves must cost what the real Z80 charges (fixed in iz80 0.5).
+        let mut m = CpmMachine::new();
+        let program = [
+            0x01, 0x03, 0x00, // LD BC,3
+            0x21, 0x00, 0x02, // LD HL,0x0200
+            0x11, 0x00, 0x03, // LD DE,0x0300
+            0xED, 0xB0,       // LDIR
+        ];
+        for (i, b) in program.iter().enumerate() {
+            m.poke(0x0100 + i as u16, *b);
+        }
+        for i in 0..3 {
+            m.poke(0x0200 + i, 0xC0 + i as u8);
+        }
+
+        let mut cpu = iz80::Cpu::new_z80();
+        cpu.registers().set_pc(0x0100);
+        for _ in 0..3 {
+            cpu.execute_instruction(&mut m);
+        }
+
+        let mut costs = Vec::new();
+        for _ in 0..3 {
+            let before = cpu.cycle_count();
+            cpu.execute_instruction(&mut m);
+            costs.push(cpu.cycle_count() - before);
+        }
+        assert_eq!(costs, vec![21, 21, 16]);
+        assert_eq!(cpu.registers().pc(), 0x010B);
+        for i in 0..3 {
+            assert_eq!(m.peek(0x0300 + i), 0xC0 + i as u8);
+        }
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn guarded_firmware_byte_write_is_ignored() {
+        let mut m = CpmMachine::new();
+        m.poke(0xFF2B, 0x8E);
+        m.guard_firmware_byte();
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x8E);
+        // Neighbours are not guarded.
+        m.poke(0xFF2A, 0x11);
+        m.poke(0xFF2C, 0x22);
+        assert_eq!(m.peek(0xFF2A), 0x11);
+        assert_eq!(m.peek(0xFF2C), 0x22);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn unguarded_firmware_byte_write_lands() {
+        let mut m = CpmMachine::new();
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x24);
+    }
+
+    #[cfg(feature = "videobeast")]
+    #[test]
+    fn firmware_byte_write_lands_when_page_3_is_remapped() {
+        let mut m = CpmMachine::new();
+        m.guard_firmware_byte();
+        // Page 3 to RAM bank 4: CPU 0xFF2B is no longer RAM byte 0xFF2B.
+        m.port_out(PORT_BANK3 as u16, PAGE_TYPE_RAM | 4);
+        m.poke(0xFF2B, 0x24);
+        assert_eq!(m.peek(0xFF2B), 0x24);
+        assert_eq!(m.ram[4 * BANK_SIZE + 0x3F2B], 0x24);
+        assert_eq!(m.ram[0xFF2B], 0);
     }
 }

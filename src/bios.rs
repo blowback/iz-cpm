@@ -101,7 +101,7 @@ impl Bios {
                 } else {
                     "unknown"
                 };
-                println!("[[BIOS command {}: {}]]", command, name);
+                diagln!("[[BIOS command {}: {}]]", command, name);
             }
             /*
             See: http://www.gaby.de/cpm/manuals/archive/cpm22htm/ch6.htm#Table_6-5
@@ -126,7 +126,7 @@ impl Bios {
             */
             match command {
                 0 => { // BOOT: Cold Start Routine
-                    println!("Terminated. cold restart");
+                    diagln!("Terminated. cold restart");
                     return ExecutionResult::ColdBoot;
                 }
                 1 => { // WBOOT: Warm boot.

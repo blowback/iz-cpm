@@ -73,7 +73,7 @@ impl <'a> BdosEnvironment<'_> {
         BdosEnvironment {state, bios, console, machine, call_trace}
     }
 
-    pub fn iobyte(&self) -> u8 {
+    pub fn iobyte(&mut self) -> u8 {
         self.machine.peek(IOBYTE_ADDRESS) & 0x0f
     }
     pub fn set_iobyte(&mut self, iobyte: u8) {
