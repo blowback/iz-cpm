@@ -3,28 +3,17 @@
 // before frame 0's captures. Each test runs the built binary in its own
 // process, with fixture sets it writes under CARGO_TARGET_TMPDIR.
 
+mod common;
+use common::*;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 
 const PASS: &str = "tests/artifacts/vb/PASS.COM";
 
-fn run_iz_cpm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run iz-cpm")
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
 /// An empty directory under CARGO_TARGET_TMPDIR, unique to `name`.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("preload").join(name);
-    let _ = fs::remove_dir_all(&dir);
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = scratch("preload", name);
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -90,18 +79,15 @@ fn assert_refused(out_dir: &Path, load: &Path, line: &str) {
         "--frames", "0", "--dump-at", "0", "--out", out_dir.to_str().unwrap(),
         "--vb-preload", load.to_str().unwrap(), PASS,
     ]);
-    let err = stderr(&out);
-    assert_eq!(out.status.code(), Some(1), "stderr: {:?}", err);
-    assert!(out.stdout.is_empty());
+    let err = assert_rejected_before_start(&out);
     assert!(err.contains(line), "stderr: {:?}", err);
-    assert!(!err.contains("Read 128 entries"), "VideoBeast started; stderr: {:?}", err);
     let written = fs::read_dir(out_dir).map(|d| d.count()).unwrap_or(0);
     assert_eq!(written, 0, "capture files written");
 }
 
 #[test]
 fn vram_file_lands_at_its_address() {
-    let dir = scratch("vram");
+    let dir = scratch_dir("vram");
     let data = pattern(300, 0x1A);
     let load = fixture(&dir.join("set"), b"v20000.vbm\n", &[("v20000.vbm", &data)]);
     let base = baseline(&dir);
@@ -115,7 +101,7 @@ fn vram_file_lands_at_its_address() {
 
 #[test]
 fn vram_file_may_end_at_the_top() {
-    let dir = scratch("top");
+    let dir = scratch_dir("top");
     let data = pattern(256, 3);
     let load = fixture(&dir.join("set"), b"vFFF00.vbm\n", &[("vFFF00.vbm", &data)]);
     let base = baseline(&dir);
@@ -125,7 +111,7 @@ fn vram_file_may_end_at_the_top() {
 
 #[test]
 fn vram_file_past_the_top_exits_1() {
-    let dir = scratch("past_top");
+    let dir = scratch_dir("past_top");
     let load = fixture(&dir.join("set"), b"v00000.vbm\nvFFF80.vbm\n", &[
         ("v00000.vbm", &[1; 16]),
         ("vFFF80.vbm", &[2; 256]),
@@ -139,7 +125,7 @@ fn vram_file_past_the_top_exits_1() {
 
 #[test]
 fn palette_file_loads_palette_1_bank_0() {
-    let dir = scratch("pal_bank");
+    let dir = scratch_dir("pal_bank");
     let data = pattern(128, 0x1A);
     let load = fixture(&dir.join("set"), b"v00.vbp\n", &[("v00.vbp", &data)]);
     let base = baseline(&dir);
@@ -152,7 +138,7 @@ fn palette_file_loads_palette_1_bank_0() {
 
 #[test]
 fn palette_file_past_bank_3_is_cut_short() {
-    let dir = scratch("pal_overflow");
+    let dir = scratch_dir("pal_overflow");
     let data = pattern(256, 9);
     let load = fixture(&dir.join("set"), b"v13.vbp\n", &[("v13.vbp", &data)]);
     let base = baseline(&dir);
@@ -164,7 +150,7 @@ fn palette_file_past_bank_3_is_cut_short() {
 
 #[test]
 fn mixed_case_name_in_a_subdirectory() {
-    let dir = scratch("subdir");
+    let dir = scratch_dir("subdir");
     let data = pattern(40, 1);
     let load = fixture(&dir.join("set"), b"sub/V0aBcD.VBM\n", &[("sub/V0aBcD.VBM", &data)]);
     let base = baseline(&dir);
@@ -174,7 +160,7 @@ fn mixed_case_name_in_a_subdirectory() {
 
 #[test]
 fn other_names_are_ignored_with_a_line_each() {
-    let dir = scratch("ignored");
+    let dir = scratch_dir("ignored");
     // None of them exists: ignored names are not read.
     let load = fixture(&dir.join("set"), b"GAME.COM\nv1234.vbm\nv24.vbp\n", &[]);
     let base = baseline(&dir);
@@ -196,7 +182,7 @@ fn other_names_are_ignored_with_a_line_each() {
 
 #[test]
 fn blank_lines_and_crlf_are_accepted_and_later_files_win() {
-    let dir = scratch("crlf");
+    let dir = scratch_dir("crlf");
     let first = pattern(64, 5);
     let second = pattern(16, 200);
     let load = fixture(&dir.join("set"), b"\r\nv01000.vbm  \r\n   \r\n\nv01010.vbm\r\n", &[
@@ -212,7 +198,7 @@ fn blank_lines_and_crlf_are_accepted_and_later_files_win() {
 
 #[test]
 fn empty_files_write_nothing() {
-    let dir = scratch("empty");
+    let dir = scratch_dir("empty");
     let load = fixture(&dir.join("set"), b"v20000.vbm\nv00.vbp\nv13.vbp\n", &[
         ("v20000.vbm", &[]),
         ("v00.vbp", &[]),
@@ -228,7 +214,7 @@ fn empty_files_write_nothing() {
 
 #[test]
 fn missing_listed_file_exits_1_naming_line_and_path() {
-    let dir = scratch("missing");
+    let dir = scratch_dir("missing");
     let load = fixture(&dir.join("set"), b"v00.vbp\n\nsub/v00100.vbm\n", &[("v00.vbp", &[1; 128])]);
     let line = format!("iz-cpm: {}:3: sub/v00100.vbm: ", load.display());
     assert_refused(&dir.join("out"), &load, &line);
@@ -236,14 +222,14 @@ fn missing_listed_file_exits_1_naming_line_and_path() {
 
 #[test]
 fn missing_load_txt_exits_1_naming_it() {
-    let dir = scratch("no_load_txt");
+    let dir = scratch_dir("no_load_txt");
     let load = dir.join("set").join("load.txt");
     assert_refused(&dir.join("out"), &load, &format!("iz-cpm: {}: ", load.display()));
 }
 
 #[test]
 fn a_full_set_twice_gives_identical_dumps_and_unchanged_registers() {
-    let dir = scratch("repeat");
+    let dir = scratch_dir("repeat");
     let load = fixture(&dir.join("set"), b"v40000.vbm\nv00.vbp\nv12.vbp\nv03.vbp\n", &[
         ("v40000.vbm", &pattern(4096, 11)),
         ("v00.vbp", &pattern(512, 12)),

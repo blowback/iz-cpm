@@ -6,7 +6,6 @@
 
 mod common;
 use common::*;
-use izcpm::Step;
 
 #[test]
 fn diagnostic_exits_without_videobeast() {

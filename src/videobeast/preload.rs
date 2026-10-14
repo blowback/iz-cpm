@@ -62,8 +62,8 @@ pub struct Preload {
 
 impl Preload {
     /// Reads `path` and every file it lists. Ignored names are reported on
-    /// stderr. Errors are full stderr lines naming `path`, the line and the
-    /// listed file.
+    /// stderr. Errors are full stderr lines naming `path`, and for a listed
+    /// file also the line and the listed path.
     pub fn load(path: &Path) -> Result<Preload, String> {
         let file = path.display().to_string();
         let text = std::fs::read_to_string(path).map_err(|err| format!("iz-cpm: {}: {}", file, err))?;

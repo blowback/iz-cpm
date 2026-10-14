@@ -148,10 +148,12 @@ The process exit code says how the run ended:
 | Code | End |
 |---|---|
 | 0 | Warm or cold boot, `--frames` reached, `--window` closed, Ctrl-C Ctrl-C Y, `--help`, `--version` |
-| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, bad `--vb-preload` set, capture file not written, program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
+| 1 | Emulator error: bad arguments, missing file, bad joystick script, bad `--dump-at`/`--png-at`/`--out`, bad `--vb-preload` set, missing beastem asset, `--window` cannot open, capture file not written, console input ended (Unix), program re-entered the TPA base, `HALT`, unimplemented BIOS or BDOS call |
 | 2 | `--max-cycles` reached |
 
-The stock build keeps its output on stdout and always exits 0.
+On Unix, if the console waits for a key and stdin is at end of file, for example piped input that ran out before the program warm booted, iz-cpm logs `iz-cpm: console input ended` on stderr and exits with code 1.
+
+The stock build keeps its output on stdout and exits 0, except that on Unix it panics when the console waits for a key and stdin is at end of file.
 
 The MicroBeast firmware console byte `0xFF2B` (screen_page) lies inside iz-cpm's BIOS jump table, so once the BIOS is set up, writes that reach that RAM byte, from the program or from iz-cpm itself, are ignored, and each one is logged on stderr. A program reads back the jump table's value (`0x8E`). Writes reach it normally when page 3 is mapped elsewhere.
 
@@ -237,7 +239,7 @@ v10.vbp
 
 Files apply in listed order, so where two overlap the later one wins. Bytes are written as they are, with no `0x1A` stripping and no padding. The preload is applied before frame 0's captures, so `--dump-at 0` shows it. It changes VRAM and palette contents only: every register is as it would be without `--vb-preload`. On hardware SLIDE leaves register `0xF5` at its last palette select; iz-cpm does not.
 
-A `load.txt` that cannot be read, a listed file that cannot be read, or a `.vbm` whose address plus length is past `0x100000` ends iz-cpm with exit code 1 before the CPU starts, naming `load.txt`, the line and the listed path, e.g. `iz-cpm: set/load.txt:2: vFFF80.vbm: 256 bytes at 0xFFF80 run past the top of VRAM`. (SLIDE on hardware writes the earlier files before it gives up on an overrunning one; iz-cpm refuses the whole set first.)
+A `load.txt` that cannot be read, a listed file that cannot be read, or a `.vbm` whose address plus length is past `0x100000` ends iz-cpm with exit code 1 before the CPU starts. The stderr line names the `load.txt` path, and for a listed file also the line and the listed path, e.g. `iz-cpm: set/load.txt: No such file or directory (os error 2)` or `iz-cpm: set/load.txt:2: vFFF80.vbm: 256 bytes at 0xFFF80 run past the top of VRAM`. (SLIDE on hardware writes the earlier files before it gives up on an overrunning one; iz-cpm refuses the whole set first.)
 
 ---
 

@@ -4,9 +4,12 @@
 // starts. Each test runs the built binary in its own process and writes
 // under CARGO_TARGET_TMPDIR.
 
+mod common;
+use common::*;
+
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::path::Path;
+use std::process::Output;
 
 const JOYECHO: &str = "tests/artifacts/vb/JOYECHO.COM";
 const VBPIC: &str = "tests/artifacts/vb/VBPIC.COM";
@@ -29,36 +32,11 @@ const GOLDEN_CASES: [(&str, &[&str]); 2] = [
     ("joyecho", &["--joy", JOY_SCRIPT, "--dump-at", "0,5", "--png-at", "5", JOYECHO]),
 ];
 
-fn run_iz_cpm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run iz-cpm")
-}
-
 /// Runs iz-cpm with `--out dir` added.
 fn run_with_out(dir: &Path, args: &[&str]) -> Output {
     let mut all = vec!["--out", dir.to_str().unwrap()];
     all.extend_from_slice(args);
     run_iz_cpm(&all)
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// An empty path under CARGO_TARGET_TMPDIR, unique to `name`.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dump_png").join(name);
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_file(&dir);
-    fs::create_dir_all(dir.parent().unwrap()).unwrap();
-    dir
 }
 
 /// File names in `dir`, sorted.
@@ -93,16 +71,13 @@ fn beastem_rgb(packed: u16) -> [u8; 3] {
 /// Asserts the run was rejected with exit 1 before the VideoBeast (and so
 /// the CPU) started, with `needle` on stderr.
 fn assert_rejected(out: &Output, needle: &str) {
-    let err = stderr(out);
-    assert!(out.stdout.is_empty(), "stdout: {:?}", stdout(out));
+    let err = assert_rejected_before_start(out);
     assert!(err.contains(needle), "stderr: {:?}", err);
-    assert!(!err.contains("Read 128 entries"), "stderr: {:?}", err);
-    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]
 fn dumps_have_the_documented_names_and_sizes_and_leave_stdout_alone() {
-    let dir = scratch("dumps");
+    let dir = scratch("dump_png", "dumps");
     let out = run_with_out(&dir, &["--dump-at", "0,2", JOYECHO]);
     assert_eq!(stdout(&out), "JOY 00 00 00 00 00 00 00 00\r\n", "stderr: {:?}", stderr(&out));
     assert_eq!(out.status.code(), Some(0));
@@ -121,7 +96,7 @@ fn dumps_have_the_documented_names_and_sizes_and_leave_stdout_alone() {
 
 #[test]
 fn png_of_a_known_picture() {
-    let dir = scratch("png");
+    let dir = scratch("dump_png", "png");
     let out = run_with_out(&dir, &["--png-at", "2", "--frames", "3", VBPIC]);
     assert_eq!(out.status.code(), Some(0), "stderr: {:?}", stderr(&out));
     assert_eq!(names(&dir), ["f00002.png"]);
@@ -152,7 +127,7 @@ fn png_of_a_known_picture() {
 
 #[test]
 fn frames_n_with_png_at_n_writes_frame_n() {
-    let dir = scratch("frames_n");
+    let dir = scratch("dump_png", "frames_n");
     let out = run_with_out(&dir, &["--frames", "2", "--png-at", "2", "--dump-at", "2", VBPIC]);
     assert_eq!(out.status.code(), Some(0), "stderr: {:?}", stderr(&out));
     assert!(dir.join("f00002.png").is_file());
@@ -162,7 +137,7 @@ fn frames_n_with_png_at_n_writes_frame_n() {
 
 #[test]
 fn frame_0_holds_the_program_and_the_start_up_registers() {
-    let dir = scratch("frame0");
+    let dir = scratch("dump_png", "frame0");
     let out = run_with_out(&dir, &["--dump-at", "0", "--png-at", "0", JOYECHO]);
     assert_eq!(out.status.code(), Some(0), "stderr: {:?}", stderr(&out));
 
@@ -194,8 +169,8 @@ fn frame_0_holds_the_program_and_the_start_up_registers() {
 #[test]
 fn the_same_run_twice_gives_identical_files() {
     let args = ["--joy", JOY_SCRIPT, "--dump-at", "0,3,5", "--png-at", "3,5", JOYECHO];
-    let a = scratch("repeat_a");
-    let b = scratch("repeat_b");
+    let a = scratch("dump_png", "repeat_a");
+    let b = scratch("dump_png", "repeat_b");
     assert_eq!(run_with_out(&a, &args).status.code(), Some(0));
     assert_eq!(run_with_out(&b, &args).status.code(), Some(0));
     let files = names(&a);
@@ -209,7 +184,7 @@ fn the_same_run_twice_gives_identical_files() {
 #[test]
 fn a_frame_never_reached_writes_nothing_and_says_so() {
     // JOYECHO warm boots in frame 7.
-    let dir = scratch("unreached");
+    let dir = scratch("dump_png", "unreached");
     let out = run_with_out(&dir, &["--png-at", "99", JOYECHO]);
     let err = stderr(&out);
     assert!(err.contains("iz-cpm: frame 99 not reached; nothing written for it\n"), "stderr: {:?}", err);
@@ -220,7 +195,7 @@ fn a_frame_never_reached_writes_nothing_and_says_so() {
 
 #[test]
 fn a_bad_list_exits_1_naming_flag_and_value() {
-    let dir = scratch("bad_list");
+    let dir = scratch("dump_png", "bad_list");
     let out = run_with_out(&dir, &["--dump-at", "1,,x", JOYECHO]);
     assert_rejected(&out, "--dump-at value \"1,,x\"");
     assert!(!dir.exists(), "--out was created");
@@ -236,7 +211,7 @@ fn a_list_without_out_exits_1() {
 
 #[test]
 fn an_out_that_is_a_file_exits_1_naming_it() {
-    let path = scratch("out_is_file");
+    let path = scratch("dump_png", "out_is_file");
     fs::write(&path, b"not a directory").unwrap();
     let out = run_with_out(&path, &["--png-at", "1", JOYECHO]);
     assert_rejected(&out, path.to_str().unwrap());
@@ -244,7 +219,7 @@ fn an_out_that_is_a_file_exits_1_naming_it() {
 
 #[test]
 fn a_missing_out_is_created() {
-    let dir = scratch("created").join("a").join("b");
+    let dir = scratch("dump_png", "created").join("a").join("b");
     let out = run_with_out(&dir, &["--png-at", "1", JOYECHO]);
     assert_eq!(out.status.code(), Some(0), "stderr: {:?}", stderr(&out));
     assert_eq!(names(&dir), ["f00001.png"]);
@@ -254,7 +229,7 @@ fn a_missing_out_is_created() {
 fn outputs_match_the_committed_goldens() {
     for (case, args) in GOLDEN_CASES {
         let golden = Path::new("tests/artifacts/vb/golden").join(case);
-        let dir = scratch(&format!("golden_{}", case));
+        let dir = scratch("dump_png", &format!("golden_{}", case));
         let out = run_with_out(&dir, args);
         assert_eq!(out.status.code(), Some(0), "{}: stderr: {:?}", case, stderr(&out));
         let files = names(&dir);

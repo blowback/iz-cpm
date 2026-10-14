@@ -5,26 +5,13 @@
 // `--joy FILE` sets what port 0x9F reads in each frame. Each test runs the
 // built binary in its own process.
 
+mod common;
+use common::*;
+
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 
 const JOYECHO: &str = "tests/artifacts/vb/JOYECHO.COM";
-
-fn run_iz_cpm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run iz-cpm")
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
 
 /// The cycle in "iz-cpm: frame N started (--frames N) at cycle C".
 fn frame_start_cycle(err: &str, frames: u64) -> u64 {
@@ -78,11 +65,8 @@ fn zero_frames_runs_no_instruction() {
 /// stderr starting with `message`, before the VideoBeast or CPU started.
 fn assert_bad_script(script: &str, message: &str) {
     let out = run_iz_cpm(&["--joy", script, JOYECHO]);
-    assert!(out.stdout.is_empty(), "stdout: {:?}", stdout(&out));
-    let err = stderr(&out);
+    let err = assert_rejected_before_start(&out);
     assert!(err.starts_with(message), "stderr: {:?}", err);
-    assert!(!err.contains("Read 128 entries"), "stderr: {:?}", err);
-    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]

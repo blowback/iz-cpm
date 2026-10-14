@@ -55,27 +55,30 @@ pub struct CpmMachine {
     in_port: Option<u8>,
     out_port: Option<u8>,
     out_value: u8,
+    #[cfg(feature = "videobeast")]
+    vb: VideoBeastState,
+}
+
+/// The machine's VideoBeast, frame and joystick state (feature
+/// `videobeast`).
+#[cfg(feature = "videobeast")]
+#[derive(Default)]
+struct VideoBeastState {
     // Emulated time at which the current instruction started; VideoBeast
     // accesses are stamped with it.
-    #[cfg(feature = "videobeast")]
     instr_start_ps: u64,
     // Attached by `run()`, never by `new()`: unit tests build machines in
     // parallel threads and must not each start SDL.
-    #[cfg(feature = "videobeast")]
     videobeast: Option<VideoBeast>,
     // Set by `run()` after the BIOS table is written: from then on writes
     // reaching RAM byte FIRMWARE_CONSOLE_BYTE are dropped.
-    #[cfg(feature = "videobeast")]
     firmware_byte_guarded: bool,
     // The VideoBeast's frame count when frame 0 started (AD-20); None until
     // the .COM starts.
-    #[cfg(feature = "videobeast")]
     frame_base: Option<u64>,
-    #[cfg(feature = "videobeast")]
     joy_script: JoyScript,
     // `--window`: the keys held at the last frame start, which replace the
     // script's value.
-    #[cfg(feature = "videobeast")]
     live_joy: Option<u8>,
 }
 
@@ -97,23 +100,13 @@ impl CpmMachine {
             out_port: None,
             out_value: 0,
             #[cfg(feature = "videobeast")]
-            instr_start_ps: 0,
-            #[cfg(feature = "videobeast")]
-            videobeast: None,
-            #[cfg(feature = "videobeast")]
-            firmware_byte_guarded: false,
-            #[cfg(feature = "videobeast")]
-            frame_base: None,
-            #[cfg(feature = "videobeast")]
-            joy_script: JoyScript::default(),
-            #[cfg(feature = "videobeast")]
-            live_joy: None,
+            vb: VideoBeastState::default(),
         }
     }
 
     #[cfg(feature = "videobeast")]
     pub fn attach_videobeast(&mut self, videobeast: VideoBeast) {
-        self.videobeast = Some(videobeast);
+        self.vb.videobeast = Some(videobeast);
     }
 
     /// From now on, drop writes whose target is the RAM byte at
@@ -122,12 +115,12 @@ impl CpmMachine {
     /// the fake BIOS jump table. Call after `Bios::setup`.
     #[cfg(feature = "videobeast")]
     pub fn guard_firmware_byte(&mut self) {
-        self.firmware_byte_guarded = true;
+        self.vb.firmware_byte_guarded = true;
     }
 
     #[cfg(feature = "videobeast")]
     fn firmware_byte_write_ignored(&self, index: usize, value: u8) -> bool {
-        if self.firmware_byte_guarded && index == FIRMWARE_CONSOLE_BYTE as usize {
+        if self.vb.firmware_byte_guarded && index == FIRMWARE_CONSOLE_BYTE as usize {
             eprintln!(
                 "iz-cpm: ignored write of 0x{:02X} to 0x{:04X} (firmware console byte)",
                 value, FIRMWARE_CONSOLE_BYTE
@@ -144,20 +137,20 @@ impl CpmMachine {
 
     #[cfg(feature = "videobeast")]
     pub fn set_instr_start_ps(&mut self, ps: u64) {
-        self.instr_start_ps = ps;
+        self.vb.instr_start_ps = ps;
     }
 
     /// Brings the attached VideoBeast up to `now_ps`.
     #[cfg(feature = "videobeast")]
     pub fn videobeast_catch_up(&mut self, now_ps: u64) {
-        if let Some(vb) = &mut self.videobeast {
+        if let Some(vb) = &mut self.vb.videobeast {
             vb.catch_up(now_ps);
         }
     }
 
     #[cfg(feature = "videobeast")]
     pub fn set_joy_script(&mut self, script: JoyScript) {
-        self.joy_script = script;
+        self.vb.joy_script = script;
     }
 
     /// Sets the value port 0x9F reads from now on, in place of the script's
@@ -165,7 +158,7 @@ impl CpmMachine {
     /// 0x00 before frames start.
     #[cfg(feature = "videobeast")]
     pub fn set_live_joy(&mut self, value: Option<u8>) {
-        self.live_joy = value;
+        self.vb.live_joy = value;
     }
 
     /// Starts frame 0 now, unless frames have already started. Call as the
@@ -173,8 +166,8 @@ impl CpmMachine {
     /// VideoBeast frames never start.
     #[cfg(feature = "videobeast")]
     pub fn start_frames(&mut self) {
-        if self.frame_base.is_none() {
-            self.frame_base = self.videobeast.as_ref().map(|vb| vb.frame_count());
+        if self.vb.frame_base.is_none() {
+            self.vb.frame_base = self.vb.videobeast.as_ref().map(|vb| vb.frame_count());
         }
     }
 
@@ -182,7 +175,7 @@ impl CpmMachine {
     /// start of the next instruction), or None before frames start.
     #[cfg(feature = "videobeast")]
     pub fn current_frame(&self) -> Option<u64> {
-        match (self.frame_base, &self.videobeast) {
+        match (self.vb.frame_base, &self.vb.videobeast) {
             (Some(base), Some(vb)) => Some(vb.frame_count() - base),
             _ => None,
         }
@@ -193,23 +186,23 @@ impl CpmMachine {
     #[cfg(feature = "videobeast")]
     fn joystick_read(&self) -> u8 {
         match self.current_frame() {
-            Some(frame) => self.live_joy.unwrap_or_else(|| self.joy_script.value_at(frame)),
+            Some(frame) => self.vb.live_joy.unwrap_or_else(|| self.vb.joy_script.value_at(frame)),
             None => 0x00,
         }
     }
 
     #[cfg(feature = "videobeast")]
     fn videobeast_read(&mut self, offset: u16) -> u8 {
-        match &mut self.videobeast {
-            Some(vb) => vb.read(offset, self.instr_start_ps),
+        match &mut self.vb.videobeast {
+            Some(vb) => vb.read(offset, self.vb.instr_start_ps),
             None => 0xFF,
         }
     }
 
     #[cfg(feature = "videobeast")]
     fn videobeast_write(&mut self, offset: u16, value: u8) {
-        if let Some(vb) = &mut self.videobeast {
-            vb.write(offset, value, self.instr_start_ps);
+        if let Some(vb) = &mut self.vb.videobeast {
+            vb.write(offset, value, self.vb.instr_start_ps);
         }
     }
 
@@ -311,12 +304,12 @@ impl CpmMachine {
 
     #[cfg(feature = "videobeast")]
     pub fn videobeast(&self) -> Option<&VideoBeast> {
-        self.videobeast.as_ref()
+        self.vb.videobeast.as_ref()
     }
 
     #[cfg(feature = "videobeast")]
     pub fn videobeast_mut(&mut self) -> Option<&mut VideoBeast> {
-        self.videobeast.as_mut()
+        self.vb.videobeast.as_mut()
     }
 
     /// MBB_SET_PAGE (BIOS 0xFDDF): set logical CPU page (0-2) to physical page

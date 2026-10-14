@@ -77,6 +77,11 @@ impl VideoBeast {
         VideoBeast::create(true)
     }
 
+    /// The shim handle, for passing to `vbshim_*`.
+    fn raw(&self) -> *mut VbShim {
+        self.handle.as_ptr()
+    }
+
     fn create(windowed: bool) -> VideoBeast {
         // A panic in another run (a failed test) must not block this one.
         let sdl_owner = SDL_OWNER.lock().unwrap_or_else(|e| e.into_inner());
@@ -92,18 +97,18 @@ impl VideoBeast {
 
     /// Reads at `offset` (masked to 14 bits) within the 16 KB window.
     pub fn read(&mut self, offset: u16, ps: u64) -> u8 {
-        unsafe { vbshim_read(self.handle.as_ptr(), offset & 0x3FFF, ps) }
+        unsafe { vbshim_read(self.raw(), offset & 0x3FFF, ps) }
     }
 
     /// Writes at `offset` (masked to 14 bits) within the 16 KB window.
     pub fn write(&mut self, offset: u16, data: u8, ps: u64) {
-        unsafe { vbshim_write(self.handle.as_ptr(), offset & 0x3FFF, data, ps) }
+        unsafe { vbshim_write(self.raw(), offset & 0x3FFF, data, ps) }
     }
 
     /// Runs every VideoBeast deadline up to and including `now_ps`.
     pub fn catch_up(&mut self, now_ps: u64) {
         while self.next_tick_ps <= now_ps {
-            self.next_tick_ps = unsafe { vbshim_tick(self.handle.as_ptr(), self.next_tick_ps) };
+            self.next_tick_ps = unsafe { vbshim_tick(self.raw(), self.next_tick_ps) };
         }
     }
 
@@ -112,19 +117,19 @@ impl VideoBeast {
     /// VideoBeast on its last line, so its first frame start comes one line
     /// after time 0, while the counter still reads 0 from `init`.
     pub fn frame_count(&self) -> u64 {
-        unsafe { vbshim_frame_count(self.handle.as_ptr()) }.saturating_sub(1)
+        unsafe { vbshim_frame_count(self.raw()) }.saturating_sub(1)
     }
 
     /// Every beastem frame start so far, the first included. Unlike
     /// `frame_count` it steps at the first frame start too.
     pub fn frame_starts(&self) -> u64 {
-        unsafe { vbshim_frame_count(self.handle.as_ptr()) }
+        unsafe { vbshim_frame_count(self.raw()) }
     }
 
     /// Drains SDL's event queue; true if it asked to quit or to close the
     /// VideoBeast window. Also brings `key_down` up to date.
     pub fn poll_quit(&mut self) -> bool {
-        unsafe { vbshim_poll(self.handle.as_ptr()) != 0 }
+        unsafe { vbshim_poll(self.raw()) != 0 }
     }
 
     /// Whether the key at SDL scancode `scancode` was down at the last
@@ -133,9 +138,12 @@ impl VideoBeast {
         unsafe { vbshim_key_down(scancode as c_int) != 0 }
     }
 
+    /// The window surface as beastem has drawn it so far, or None if there
+    /// is no surface, it is not 0x00RRGGBB, or its size is unusable. The
+    /// borrow ends before the next tick or write, which may move the pixels.
     pub fn frame(&self) -> Option<Frame<'_>> {
         let (mut w, mut h, mut pitch): (c_int, c_int, c_int) = (0, 0, 0);
-        let ptr = unsafe { vbshim_frame(self.handle.as_ptr(), &mut w, &mut h, &mut pitch) };
+        let ptr = unsafe { vbshim_frame(self.raw(), &mut w, &mut h, &mut pitch) };
         if ptr.is_null() || w <= 0 || h <= 0 || pitch < w * 4 {
             return None;
         }
@@ -143,12 +151,10 @@ impl VideoBeast {
         let pixels = unsafe { std::slice::from_raw_parts(ptr, pitch / 4 * h) };
         Some(Frame { width: w, height: h, pitch, pixels })
     }
-}
 
-impl VideoBeast {
     /// The 1 MiB of VRAM, by address. Has no effect on the VideoBeast.
     pub fn vram(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(vbshim_vram(self.handle.as_ptr()), VRAM_SIZE) }
+        unsafe { std::slice::from_raw_parts(vbshim_vram(self.raw()), VRAM_SIZE) }
     }
 
     /// Register `r` as stored, without the side effects of a CPU read.
@@ -156,21 +162,21 @@ impl VideoBeast {
     /// values as of the last unlocked CPU read of a register 0x80-0xFD, not
     /// live values.
     pub fn register(&self, r: u8) -> u8 {
-        unsafe { vbshim_read_register(self.handle.as_ptr(), r) }
+        unsafe { vbshim_read_register(self.raw(), r) }
     }
 
     /// Byte `byte` (0-511) of palette 1 or 2: entry `byte >> 1`, low byte
     /// when even, high when odd.
     pub fn palette_byte(&self, palette: u8, byte: u16) -> u8 {
         assert!(palette == 1 || palette == 2, "palette {}", palette);
-        unsafe { vbshim_read_palette(self.handle.as_ptr(), palette as c_int, byte) }
+        unsafe { vbshim_read_palette(self.raw(), palette as c_int, byte) }
     }
 
     /// Copies `data` into VRAM from `addr`. Panics if it would run past the
     /// top of VRAM.
     pub fn preload_vram(&mut self, addr: u32, data: &[u8]) {
         assert!(addr as usize + data.len() <= VRAM_SIZE, "{} bytes at {:#X} run past VRAM", data.len(), addr);
-        unsafe { vbshim_preload_vram(self.handle.as_ptr(), addr, data.as_ptr(), data.len() as u32) }
+        unsafe { vbshim_preload_vram(self.raw(), addr, data.as_ptr(), data.len() as u32) }
     }
 
     /// Loads palette `p` (0 for palette 1, 1 for palette 2) from `bank`
@@ -181,14 +187,14 @@ impl VideoBeast {
         assert!(p <= 1 && bank <= 3, "palette {} bank {}", p, bank);
         let len = data.len().min((4 - bank as usize) * 128);
         unsafe {
-            vbshim_preload_palette(self.handle.as_ptr(), p as c_int, bank as c_int, data.as_ptr(), len as u32)
+            vbshim_preload_palette(self.raw(), p as c_int, bank as c_int, data.as_ptr(), len as u32)
         }
     }
 }
 
 impl Drop for VideoBeast {
     fn drop(&mut self) {
-        unsafe { vbshim_destroy(self.handle.as_ptr()) }
+        unsafe { vbshim_destroy(self.raw()) }
     }
 }
 

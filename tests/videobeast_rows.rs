@@ -8,7 +8,6 @@
 
 mod common;
 use common::*;
-use izcpm::Step;
 
 // Timing model: 125,000 ps per T-state (8 MHz); a read sees the counter as of
 // the start of its instruction. The VideoBeast starts at time 0 with its

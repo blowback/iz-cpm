@@ -3,15 +3,14 @@
 // vendored exit(1) on a missing asset can be seen from outside. Each test
 // is its own process, so they may run in parallel.
 
-use std::process::{Command, Output, Stdio};
+mod common;
+use common::*;
+
+use std::process::Output;
 
 fn run_tracer(assets: Option<&str>) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_iz-cpm"));
-    cmd.arg("tests/artifacts/vb/VBTRACE.COM").stdin(Stdio::null());
-    if let Some(dir) = assets {
-        cmd.env("BEASTEM_ASSETS", dir);
-    }
-    cmd.output().expect("run iz-cpm")
+    let env: Vec<(&str, &str)> = assets.map(|dir| ("BEASTEM_ASSETS", dir)).into_iter().collect();
+    run_iz_cpm_env(&["tests/artifacts/vb/VBTRACE.COM"], &env)
 }
 
 #[test]
@@ -19,7 +18,7 @@ fn stdout_is_the_cp_m_console_only() {
     let out = run_tracer(None);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
+        stdout(&out),
         "VRAM A5 5A\r\nF9 20\r\nLINES 0069\r\n"
     );
 }
@@ -32,5 +31,5 @@ fn missing_assets_end_the_process_with_a_message() {
     std::fs::remove_dir(&empty).unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("video_registers.mem"));
+    assert!(stderr(&out).contains("video_registers.mem"));
 }

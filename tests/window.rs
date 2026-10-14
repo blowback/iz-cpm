@@ -6,9 +6,12 @@
 // check pacing, exit codes and that `--joy` wins over the keys. Each test
 // runs the built binary in its own process.
 
+mod common;
+use common::*;
+
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::path::Path;
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 const JOYMOVE: &str = "tests/artifacts/vb/JOYMOVE.COM";
@@ -27,28 +30,8 @@ const CYAN: u16 = 0x03FF;
 const WHITE: u16 = 0x7FFF;
 
 fn run(args: &[&str], window: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_iz-cpm"));
-    command.args(args).stdin(Stdio::null());
-    if window {
-        command.env("SDL_VIDEODRIVER", "dummy");
-    }
-    command.output().expect("run iz-cpm")
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// An empty path under CARGO_TARGET_TMPDIR, unique to `name`.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("window").join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(dir.parent().unwrap()).unwrap();
-    dir
+    let env: &[(&str, &str)] = if window { &[("SDL_VIDEODRIVER", "dummy")] } else { &[] };
+    run_iz_cpm_env(args, env)
 }
 
 fn read(dir: &Path, frame: u64, suffix: &str) -> Vec<u8> {
@@ -94,7 +77,7 @@ fn joymove_marker_follows_the_script() {
     // nothing at 29, left + up from 30, nothing from 34. JOYMOVE reads the
     // port once per frame from frame 3 or so, after clearing the field; a
     // dump at frame F shows frames up to F - 1.
-    let dir = scratch("joymove");
+    let dir = scratch("window", "joymove");
     run_joymove(&dir);
     assert_eq!(marker(&dir, 5), ((62, 62), GREEN));
     assert_eq!(marker(&dir, 20), ((72, 67), YELLOW));
@@ -106,8 +89,8 @@ fn joymove_marker_follows_the_script() {
 
 #[test]
 fn joymove_runs_give_identical_dumps() {
-    let a = scratch("joymove-a");
-    let b = scratch("joymove-b");
+    let a = scratch("window", "joymove-a");
+    let b = scratch("window", "joymove-b");
     run_joymove(&a);
     run_joymove(&b);
     for frame in DUMP_FRAMES.split(',').map(|f| f.parse::<u64>().unwrap()) {
@@ -132,7 +115,7 @@ fn window_runs_at_real_speed() {
 
 #[test]
 fn window_with_captures_writes_them() {
-    let dir = scratch("window-png");
+    let dir = scratch("window", "window-png");
     let out = run(&["--window", "--frames", "3", "--png-at", "2", "--out", dir.to_str().unwrap(), JOYMOVE], true);
     assert_eq!(out.status.code(), Some(0), "stderr: {:?}", stderr(&out));
     assert!(dir.join("f00002.png").is_file());
@@ -141,12 +124,7 @@ fn window_with_captures_writes_them() {
 #[test]
 fn window_that_cannot_open_exits_1() {
     // An unknown driver makes SDL fail to start, on any host.
-    let out = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
-        .args(["--window", LOOP])
-        .stdin(Stdio::null())
-        .env("SDL_VIDEODRIVER", "no-such-driver")
-        .output()
-        .expect("run iz-cpm");
+    let out = run_iz_cpm_env(&["--window", LOOP], &[("SDL_VIDEODRIVER", "no-such-driver")]);
     assert!(out.stdout.is_empty(), "stdout: {:?}", stdout(&out));
     assert!(stderr(&out).contains("vbshim: SDL_Init failed"), "stderr: {:?}", stderr(&out));
     assert_eq!(out.status.code(), Some(1));

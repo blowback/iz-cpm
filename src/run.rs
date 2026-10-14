@@ -5,6 +5,8 @@ use std::thread;
 use std::time::Duration;
 
 use clap::{Arg, App};
+#[cfg(feature = "videobeast")]
+use clap::ArgMatches;
 use iz80::*;
 
 
@@ -18,6 +20,10 @@ use crate::fcb::*;
 use crate::terminal::TerminalEmulator;
 use crate::terminal::Transparent;
 use crate::terminal_adm3a::Adm3aToAnsi;
+#[cfg(feature = "videobeast")]
+use std::collections::BTreeSet;
+#[cfg(feature = "videobeast")]
+use std::path::{Path, PathBuf};
 #[cfg(feature = "videobeast")]
 use crate::videobeast::{VideoBeast, PS_PER_T_STATE};
 #[cfg(feature = "videobeast")]
@@ -46,7 +52,7 @@ static CCP_BINARY: &[u8] = include_bytes!("../third-party/bin/zcpr.bin");
 
 /// Runs iz-cpm to completion and returns the exit code: EXIT_OK for a normal
 /// end, EXIT_CYCLE_LIMIT for `--max-cycles`, EXIT_ERROR for anything else.
-pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) -> i32 {
+pub fn run(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) -> i32 {
     // Parse arguments
     let app = App::new(WELCOME)
     .arg(Arg::with_name("CMD")
@@ -184,112 +190,15 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     #[cfg(not(feature = "videobeast"))]
     let exit_on_warmboot = false;
     #[cfg(feature = "videobeast")]
-    let max_cycles: Option<u64> = match matches.value_of("max_cycles") {
-        None => None,
-        Some(text) => match text.parse::<u64>() {
-            Ok(n) => Some(n),
-            Err(_) => {
-                eprintln!("Invalid --max-cycles value \"{}\": expected a whole number of T-states.", text);
-                return EXIT_ERROR;
-            }
-        },
+    let mut vb = match VideoBeastRun::from_matches(&matches) {
+        Ok(vb) => vb,
+        Err(()) => return EXIT_ERROR,
     };
-
-    #[cfg(feature = "videobeast")]
-    let frames: Option<u64> = match matches.value_of("frames") {
-        None => None,
-        Some(text) => match text.parse::<u64>() {
-            Ok(n) => Some(n),
-            Err(_) => {
-                eprintln!("Invalid --frames value \"{}\": expected a whole number of frames.", text);
-                return EXIT_ERROR;
-            }
-        },
-    };
-    #[cfg(feature = "videobeast")]
-    let window = matches.is_present("window");
-    // With --joy the script drives port 0x9F and the keys are ignored.
-    #[cfg(feature = "videobeast")]
-    let keys_drive_joy = window && !matches.is_present("joy");
-    #[cfg(feature = "videobeast")]
-    let joy_script = match matches.value_of("joy") {
-        None => JoyScript::default(),
-        Some(path) => match JoyScript::load(std::path::Path::new(path)) {
-            Ok(script) => script,
-            Err(err) => {
-                eprintln!("{}", err);
-                return EXIT_ERROR;
-            }
-        },
-    };
-
-    #[cfg(feature = "videobeast")]
-    let (dump_at, png_at) = {
-        let parse = |name: &str, flag: &str| match matches.value_of(name) {
-            None => Ok(FrameList::default()),
-            Some(text) => FrameList::parse(flag, text),
-        };
-        match (parse("dump_at", "--dump-at"), parse("png_at", "--png-at")) {
-            (Ok(dump_at), Ok(png_at)) => (dump_at, png_at),
-            (Err(err), _) | (_, Err(err)) => {
-                eprintln!("{}", err);
-                return EXIT_ERROR;
-            }
-        }
-    };
-    #[cfg(feature = "videobeast")]
-    let out_dir: Option<std::path::PathBuf> = match matches.value_of("out") {
-        None => {
-            if !dump_at.is_empty() || !png_at.is_empty() {
-                eprintln!("iz-cpm: --dump-at and --png-at need --out DIR to say where the files go");
-                return EXIT_ERROR;
-            }
-            None
-        }
-        Some(path) => {
-            let dir = std::path::PathBuf::from(path);
-            if dir.exists() && !dir.is_dir() {
-                eprintln!("iz-cpm: --out {}: not a directory", path);
-                return EXIT_ERROR;
-            }
-            if let Err(err) = fs::create_dir_all(&dir) {
-                eprintln!("iz-cpm: --out {}: {}", path, err);
-                return EXIT_ERROR;
-            }
-            Some(dir)
-        }
-    };
-    #[cfg(feature = "videobeast")]
-    let preload = match matches.value_of("vb_preload") {
-        None => Preload::default(),
-        Some(path) => match Preload::load(std::path::Path::new(path)) {
-            Ok(preload) => preload,
-            Err(err) => {
-                eprintln!("{}", err);
-                return EXIT_ERROR;
-            }
-        },
-    };
-    // Listed frames not yet captured, in order.
-    #[cfg(feature = "videobeast")]
-    let mut pending_captures: std::collections::BTreeSet<u64> =
-        dump_at.frames().iter().chain(png_at.frames()).copied().collect();
-    #[cfg(feature = "videobeast")]
-    let mut last_frame: Option<u64> = None;
-    // --window: beastem's frame starts as of the last event poll.
-    #[cfg(feature = "videobeast")]
-    let mut polled_frame_starts: u64 = 0;
 
     // Init device
     let mut machine = CpmMachine::new();
     #[cfg(feature = "videobeast")]
-    {
-        let mut videobeast = if window { VideoBeast::with_window() } else { VideoBeast::new() };
-        preload.apply(&mut videobeast);
-        machine.attach_videobeast(videobeast);
-    }
-    #[cfg(feature = "videobeast")]
-    machine.set_joy_script(joy_script);
+    vb.attach(&mut machine);
     if let Some(path) = dump_basename {
         machine.set_dump_basename(std::path::PathBuf::from(path));
     }
@@ -504,78 +413,17 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
     cpu.set_trace(cpu_trace);
     // Emulated time 0 is now.
     #[cfg(feature = "videobeast")]
-    let mut pacer = Pacer::new();
+    vb.start_clock();
     let mut n = 0;
     let exit_code = loop {
-        // Frames (AD-20): frame 0 starts as the .COM's first instruction is
-        // about to run; later entries at 0x100 (CCP mode) do not restart it.
-        // Checked before the instruction, so no instruction of frame N runs.
         #[cfg(feature = "videobeast")]
-        {
-            if cpu.registers().pc() == TPA_BASE_ADDRESS {
-                machine.start_frames();
-            }
-            // Captures for frame n come before the --frames check, so
-            // `--frames N --png-at N` writes frame N.
-            let frame_now = machine.current_frame();
-            if frame_now.is_some() && frame_now != last_frame {
-                last_frame = frame_now;
-                let frame = frame_now.unwrap();
-                if pending_captures.remove(&frame) {
-                    let dir = out_dir.as_deref().expect("--out is checked before the run");
-                    if let Err(err) = capture_frame(&machine, dir, frame, dump_at.contains(frame), png_at.contains(frame)) {
-                        eprintln!("{}", err);
-                        break EXIT_ERROR;
-                    }
-                }
-            }
-            if let (Some(limit), Some(frame)) = (frames, machine.current_frame()) {
-                if frame >= limit {
-                    eprintln!("iz-cpm: frame {} started (--frames {}) at cycle {}", frame, limit, cpu.cycle_count());
-                    break EXIT_OK;
-                }
-            }
+        if let Some(code) = vb.before_instruction(&mut cpu, &mut machine) {
+            break code;
         }
-
-        // VideoBeast accesses are stamped with the time the instruction
-        // starts; the catch-up after the previous instruction already brought
-        // the VideoBeast to that time, so its clock never goes backwards.
-        #[cfg(feature = "videobeast")]
-        machine.set_instr_start_ps(cpu.cycle_count() * PS_PER_T_STATE);
         cpu.execute_instruction(&mut machine);
         #[cfg(feature = "videobeast")]
-        machine.videobeast_catch_up(cpu.cycle_count() * PS_PER_T_STATE);
-
-        // --window: at each VideoBeast frame start, whether or not program
-        // frames have started, handle window events, sample the keys for the
-        // frame and hold emulated time to wall-clock time.
-        #[cfg(feature = "videobeast")]
-        if window {
-            let starts = machine.videobeast().map_or(0, |vb| vb.frame_starts());
-            if starts != polled_frame_starts {
-                polled_frame_starts = starts;
-                let vb = machine.videobeast_mut().expect("--window runs with a VideoBeast");
-                if vb.poll_quit() {
-                    match machine.current_frame() {
-                        Some(frame) => eprintln!("iz-cpm: window closed at frame {}", frame),
-                        None => eprintln!("iz-cpm: window closed at frame -"),
-                    }
-                    break EXIT_OK;
-                }
-                if keys_drive_joy {
-                    let bits = joy_bits(|scancode| vb.key_down(scancode));
-                    machine.set_live_joy(Some(bits));
-                }
-                pacer.wait_until(cpu.cycle_count() * PS_PER_T_STATE);
-            }
-        }
-
-        #[cfg(feature = "videobeast")]
-        if let Some(limit) = max_cycles {
-            if cpu.cycle_count() >= limit {
-                eprintln!("iz-cpm: cycle limit reached (--max-cycles {}) at PC {:#06x}", limit, cpu.registers().pc());
-                break EXIT_CYCLE_LIMIT;
-            }
+        if let Some(code) = vb.after_instruction(&mut cpu, &mut machine) {
+            break code;
         }
 
         // Runaway guard (single-program mode): a loaded .COM is entered once at
@@ -667,6 +515,12 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
             }
         }
 
+        #[cfg(feature = "videobeast")]
+        if console.input_ended() {
+            eprintln!("iz-cpm: console input ended");
+            break EXIT_ERROR;
+        }
+
         if console.terminated() {
             break EXIT_OK;
         }
@@ -680,15 +534,232 @@ pub fn run<'a>(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulato
         }
     };
     #[cfg(feature = "videobeast")]
-    for frame in pending_captures {
-        eprintln!("iz-cpm: frame {} not reached; nothing written for it", frame);
-    }
+    vb.finish();
     exit_code
+}
+
+/// The `videobeast` options and the run loop's state for them: frames,
+/// captures, `--max-cycles` and `--window`.
+#[cfg(feature = "videobeast")]
+struct VideoBeastRun {
+    max_cycles: Option<u64>,
+    frames: Option<u64>,
+    window: bool,
+    // With --joy the script drives port 0x9F and the keys are ignored.
+    keys_drive_joy: bool,
+    joy_script: JoyScript,
+    preload: Preload,
+    dump_at: FrameList,
+    png_at: FrameList,
+    out_dir: Option<PathBuf>,
+    // Listed frames not yet captured, in order.
+    pending_captures: BTreeSet<u64>,
+    last_frame: Option<u64>,
+    // --window: beastem's frame starts as of the last event poll.
+    polled_frame_starts: u64,
+    pacer: Pacer,
+}
+
+#[cfg(feature = "videobeast")]
+impl VideoBeastRun {
+    /// Reads and checks the options, creating `--out`. On a bad option,
+    /// prints why on stderr and returns Err.
+    fn from_matches(matches: &ArgMatches) -> Result<VideoBeastRun, ()> {
+        let max_cycles = parse_u64_flag(matches, "max_cycles", "--max-cycles", "T-states")?;
+        let frames = parse_u64_flag(matches, "frames", "--frames", "frames")?;
+        let window = matches.is_present("window");
+        let keys_drive_joy = window && !matches.is_present("joy");
+        let joy_script = load_or_default(matches, "joy", JoyScript::load)?;
+
+        let parse = |name: &str, flag: &str| match matches.value_of(name) {
+            None => Ok(FrameList::default()),
+            Some(text) => FrameList::parse(flag, text),
+        };
+        let (dump_at, png_at) = match (parse("dump_at", "--dump-at"), parse("png_at", "--png-at")) {
+            (Ok(dump_at), Ok(png_at)) => (dump_at, png_at),
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("{}", err);
+                return Err(());
+            }
+        };
+        let out_dir = match matches.value_of("out") {
+            None => {
+                if !dump_at.is_empty() || !png_at.is_empty() {
+                    eprintln!("iz-cpm: --dump-at and --png-at need --out DIR to say where the files go");
+                    return Err(());
+                }
+                None
+            }
+            Some(path) => {
+                let dir = PathBuf::from(path);
+                if dir.exists() && !dir.is_dir() {
+                    eprintln!("iz-cpm: --out {}: not a directory", path);
+                    return Err(());
+                }
+                if let Err(err) = fs::create_dir_all(&dir) {
+                    eprintln!("iz-cpm: --out {}: {}", path, err);
+                    return Err(());
+                }
+                Some(dir)
+            }
+        };
+        let preload = load_or_default(matches, "vb_preload", Preload::load)?;
+        let pending_captures = dump_at.frames().iter().chain(png_at.frames()).copied().collect();
+        Ok(VideoBeastRun {
+            max_cycles,
+            frames,
+            window,
+            keys_drive_joy,
+            joy_script,
+            preload,
+            dump_at,
+            png_at,
+            out_dir,
+            pending_captures,
+            last_frame: None,
+            polled_frame_starts: 0,
+            pacer: Pacer::new(),
+        })
+    }
+
+    /// Starts the VideoBeast, with `--window` if given, applies
+    /// `--vb-preload` and attaches it to `machine` with the `--joy` script.
+    fn attach(&mut self, machine: &mut CpmMachine) {
+        let mut videobeast = if self.window { VideoBeast::with_window() } else { VideoBeast::new() };
+        std::mem::take(&mut self.preload).apply(&mut videobeast);
+        machine.attach_videobeast(videobeast);
+        machine.set_joy_script(std::mem::take(&mut self.joy_script));
+    }
+
+    /// Makes emulated time 0 now for `--window` pacing.
+    fn start_clock(&mut self) {
+        self.pacer = Pacer::new();
+    }
+
+    /// Runs before each instruction: starts frames, writes captures, ends
+    /// the run at `--frames`, and stamps the instruction's start time.
+    /// Returns the exit code if the run ends here.
+    fn before_instruction(&mut self, cpu: &mut Cpu, machine: &mut CpmMachine) -> Option<i32> {
+        // Frames (AD-20): frame 0 starts as the .COM's first instruction is
+        // about to run; later entries at 0x100 (CCP mode) do not restart it.
+        // Checked before the instruction, so no instruction of frame N runs.
+        if cpu.registers().pc() == TPA_BASE_ADDRESS {
+            machine.start_frames();
+        }
+        // Captures for frame n come before the --frames check, so
+        // `--frames N --png-at N` writes frame N.
+        if let Some(frame) = machine.current_frame() {
+            if self.last_frame != Some(frame) {
+                self.last_frame = Some(frame);
+                if self.pending_captures.remove(&frame) {
+                    let dir = self.out_dir.as_deref().expect("--out is checked before the run");
+                    if let Err(err) = capture_frame(machine, dir, frame, self.dump_at.contains(frame), self.png_at.contains(frame)) {
+                        eprintln!("{}", err);
+                        return Some(EXIT_ERROR);
+                    }
+                }
+            }
+        }
+        if let (Some(limit), Some(frame)) = (self.frames, machine.current_frame()) {
+            if frame >= limit {
+                eprintln!("iz-cpm: frame {} started (--frames {}) at cycle {}", frame, limit, cpu.cycle_count());
+                return Some(EXIT_OK);
+            }
+        }
+
+        // VideoBeast accesses are stamped with the time the instruction
+        // starts; the catch-up after the previous instruction already brought
+        // the VideoBeast to that time, so its clock never goes backwards.
+        machine.set_instr_start_ps(cpu.cycle_count() * PS_PER_T_STATE);
+        None
+    }
+
+    /// Runs after each instruction: brings the VideoBeast up to now, handles
+    /// `--window` and ends the run at `--max-cycles`. Returns the exit code
+    /// if the run ends here.
+    fn after_instruction(&mut self, cpu: &mut Cpu, machine: &mut CpmMachine) -> Option<i32> {
+        machine.videobeast_catch_up(cpu.cycle_count() * PS_PER_T_STATE);
+
+        // --window: at each VideoBeast frame start, whether or not program
+        // frames have started, handle window events, sample the keys for the
+        // frame and hold emulated time to wall-clock time.
+        if self.window {
+            let starts = machine.videobeast().map_or(0, |vb| vb.frame_starts());
+            if starts != self.polled_frame_starts {
+                self.polled_frame_starts = starts;
+                let vb = machine.videobeast_mut().expect("--window runs with a VideoBeast");
+                if vb.poll_quit() {
+                    match machine.current_frame() {
+                        Some(frame) => eprintln!("iz-cpm: window closed at frame {}", frame),
+                        None => eprintln!("iz-cpm: window closed at frame -"),
+                    }
+                    return Some(EXIT_OK);
+                }
+                if self.keys_drive_joy {
+                    let bits = joy_bits(|scancode| vb.key_down(scancode));
+                    machine.set_live_joy(Some(bits));
+                }
+                self.pacer.wait_until(cpu.cycle_count() * PS_PER_T_STATE);
+            }
+        }
+
+        if let Some(limit) = self.max_cycles {
+            if cpu.cycle_count() >= limit {
+                eprintln!("iz-cpm: cycle limit reached (--max-cycles {}) at PC {:#06x}", limit, cpu.registers().pc());
+                return Some(EXIT_CYCLE_LIMIT);
+            }
+        }
+        None
+    }
+
+    /// Runs once the loop has ended: names each listed frame not reached.
+    fn finish(self) {
+        for frame in self.pending_captures {
+            eprintln!("iz-cpm: frame {} not reached; nothing written for it", frame);
+        }
+    }
+}
+
+/// The value of whole-number option `name` (`flag` on the command line),
+/// None if absent. On a bad value, prints why on stderr and returns Err.
+#[cfg(feature = "videobeast")]
+fn parse_u64_flag(matches: &ArgMatches, name: &str, flag: &str, unit: &str) -> Result<Option<u64>, ()> {
+    match matches.value_of(name) {
+        None => Ok(None),
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) => Ok(Some(n)),
+            Err(_) => {
+                eprintln!("Invalid {} value \"{}\": expected a whole number of {}.", flag, text, unit);
+                Err(())
+            }
+        },
+    }
+}
+
+/// `load(path)` for the path given to option `name`, or `T::default()` if
+/// the option is absent. On a load error, prints it on stderr and returns
+/// Err.
+#[cfg(feature = "videobeast")]
+fn load_or_default<T: Default, E: std::fmt::Display>(
+    matches: &ArgMatches,
+    name: &str,
+    load: impl FnOnce(&Path) -> Result<T, E>,
+) -> Result<T, ()> {
+    match matches.value_of(name) {
+        None => Ok(T::default()),
+        Some(path) => match load(Path::new(path)) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                eprintln!("{}", err);
+                Err(())
+            }
+        },
+    }
 }
 
 /// Writes frame `frame`'s dumps and/or PNG to `dir` (`--dump-at`, `--png-at`).
 #[cfg(feature = "videobeast")]
-fn capture_frame(machine: &CpmMachine, dir: &std::path::Path, frame: u64, dump: bool, png: bool) -> Result<(), String> {
+fn capture_frame(machine: &CpmMachine, dir: &Path, frame: u64, dump: bool, png: bool) -> Result<(), String> {
     let vb = machine.videobeast().expect("frames only start with a VideoBeast attached");
     if dump {
         capture::write_dumps(dir, frame, vb, &machine.cpu_view(), machine.ram())?;

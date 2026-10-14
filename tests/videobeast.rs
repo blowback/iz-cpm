@@ -8,7 +8,6 @@
 
 mod common;
 use common::*;
-use izcpm::Step;
 
 // Expected line delta, mode 0 (640x480): one line is 800 pixels x 40,000 ps
 // = 32 us = 256 T-states at 8 MHz (125,000 ps per T-state).

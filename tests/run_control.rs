@@ -4,24 +4,11 @@
 // limit), and a store to the firmware byte 0xFF2B leaves the BIOS jump table
 // alone. Each test runs the built binary in its own process.
 
+mod common;
+use common::*;
+
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
-
-fn run_iz_cpm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run iz-cpm")
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
+use std::process::{Command, Stdio};
 
 #[test]
 fn program_end_exits_0_with_only_console_text() {
@@ -97,4 +84,24 @@ fn call_trace_goes_to_stderr() {
     assert!(!text.contains("[["), "trace on stdout: {:?}", text);
     assert!(text.ends_with("PASS\r\n"), "stdout: {:?}", text);
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn console_input_ending_before_a_warm_boot_exits_1() {
+    // DIR is built into the CCP, so no program warm boots; the CCP's next
+    // read finds stdin at end of file.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
+        .args(["-a", "tests/artifacts/vb", "--exit-on-warmboot"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start iz-cpm");
+    child.stdin.take().unwrap().write_all(b"DIR\r").unwrap();
+    let out = child.wait_with_output().expect("wait for iz-cpm");
+    let err = stderr(&out);
+    assert!(stdout(&out).contains("PASS"), "stdout: {:?}", stdout(&out));
+    assert!(err.ends_with("iz-cpm: console input ended\n"), "stderr: {:?}", err);
+    assert!(!err.contains("panicked"), "stderr: {:?}", err);
+    assert_eq!(out.status.code(), Some(1));
 }
