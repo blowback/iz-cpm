@@ -13,13 +13,18 @@ extern "C" {
 
 typedef struct vbshim vbshim;
 
-/* Start SDL, point the asset loader at assets_dir and initialise a
+/* Point the asset loader at assets_dir, start SDL and initialise a
  * VideoBeast at time 0. With windowed 0, SDL is forced onto its dummy video
  * driver; otherwise it picks its usual driver (SDL_VIDEODRIVER applies) and
- * the VideoBeast's window shows on screen; if SDL fails to start, or can
- * only offer a headless driver (offscreen, dummy) that the environment did
- * not ask for, it logs and calls exit(1). The vendored code calls exit(1) if an asset is
- * missing or the window cannot be created. */
+ * the VideoBeast's window shows on screen.
+ *
+ * Returns NULL, after one stderr line, on every failure it detects: a
+ * missing asset file (checked before SDL starts, with the vendored
+ * wording), SDL failing to start, SDL offering only a headless driver
+ * (offscreen, dummy) for windowed when the environment did not ask for one,
+ * or no memory for the VideoBeast. SDL is left shut down, so a later call
+ * can succeed. The vendored code still calls exit(1) if SDL starts but the
+ * window cannot be created. */
 vbshim  *vbshim_create(const char *assets_dir, int windowed);
 void     vbshim_destroy(vbshim *h);
 

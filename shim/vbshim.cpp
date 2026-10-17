@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <new>
 
@@ -41,9 +42,31 @@ static Uint32 newest_window_id() {
     return found;
 }
 
+// The vendored loads end the process with exit(1) on a missing asset file.
+// Check the files it will open first, in its order and with its wording, so
+// a missing one returns to the caller instead.
+static bool assets_present() {
+    static const char *const files[] = {"video_registers.mem", "palette_1.mem", "palette_2.mem"};
+    static const char *const kinds[] = {"Register", "Palette", "Palette"};
+    for (int i = 0; i < 3; i++) {
+        const std::string path = assetPath(files[i]);
+        std::ifstream file(path.c_str());
+        if (!file) {
+            std::cout << kinds[i] << " file does not exist: " << path << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 extern "C" vbshim *vbshim_create(const char *assets_dir, int windowed) {
     // The vendored code logs to std::cout; stdout belongs to the CP/M console.
     std::cout.rdbuf(std::cerr.rdbuf());
+
+    initAssetPath(assets_dir);
+    if (!assets_present()) {
+        return nullptr;
+    }
 
     // Headless: override priority, so SDL_VIDEODRIVER etc. in the
     // environment cannot win. Windowed: SDL's normal driver choice.
@@ -52,17 +75,15 @@ extern "C" vbshim *vbshim_create(const char *assets_dir, int windowed) {
     }
     SDL_SetHintWithPriority(SDL_HINT_NO_SIGNAL_HANDLERS, "1", SDL_HINT_OVERRIDE);
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+        // A failed SDL_InitSubSystem undoes itself, so there is nothing to
+        // quit here.
         std::cerr << "vbshim: SDL_Init failed: " << SDL_GetError() << std::endl;
-        // --window: no window can open, so end as the vendored code does.
-        if (windowed) {
-            std::exit(1);
-        }
         return nullptr;
     }
     // With no display, SDL 2.0.22 and later fall back to the offscreen
     // driver, which would run without a visible window. Unless the
     // environment asked for a driver, treat that as SDL failing to open the
-    // window: log it and exit 1, as the vendored code does.
+    // window: log it, shut SDL down and fail.
     if (windowed) {
         const char *requested = SDL_getenv("SDL_VIDEODRIVER");
         const char *driver = SDL_GetCurrentVideoDriver();
@@ -71,11 +92,10 @@ extern "C" vbshim *vbshim_create(const char *assets_dir, int windowed) {
         if (headless && (requested == nullptr || requested[0] == '\0')) {
             std::cerr << "vbshim: --window: no display to open a window on (SDL chose its "
                       << driver << " video driver)" << std::endl;
-            std::exit(1);
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            return nullptr;
         }
     }
-
-    initAssetPath(assets_dir);
 
     // The constructor leaves VRAM, the registers below 0x80 and the palette
     // entries the asset files do not fill uninitialised. Build the
@@ -83,6 +103,7 @@ extern "C" vbshim *vbshim_create(const char *assets_dir, int windowed) {
     void *storage = std::calloc(1, sizeof(VideoBeast));
     if (storage == nullptr) {
         std::cerr << "vbshim: out of memory for the VideoBeast" << std::endl;
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return nullptr;
     }
     vbshim *h = new vbshim;

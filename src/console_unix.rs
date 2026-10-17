@@ -8,6 +8,36 @@ use crate::console_emulator::ConsoleEmulator;
 
 const STDIN_FD: i32 = 0;
 
+// The terminal settings found at start-up, for `restore_at_exit`.
+#[cfg(feature = "videobeast")]
+static AT_EXIT_TERMIOS: std::sync::OnceLock<Termios> = std::sync::OnceLock::new();
+
+#[cfg(feature = "videobeast")]
+extern "C" {
+    fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
+}
+
+// Runs on every exit, `std::process::exit` in main included; on a normal
+// exit it re-applies the settings `Drop` already restored. It is needed for
+// C `exit` calls that skip `Drop`, such as the vendored beastem code's when
+// it cannot create the window. Errors are ignored; the process is ending.
+#[cfg(feature = "videobeast")]
+extern "C" fn restore_at_exit() {
+    if let Some(initial) = AT_EXIT_TERMIOS.get() {
+        let _ = tcsetattr(STDIN_FD, TCSANOW, initial);
+    }
+}
+
+// Records `initial` and registers `restore_at_exit`, on the first call only.
+#[cfg(feature = "videobeast")]
+fn restore_terminal_at_exit(initial: Termios) {
+    if AT_EXIT_TERMIOS.set(initial).is_ok() {
+        unsafe {
+            atexit(restore_at_exit);
+        }
+    }
+}
+
 pub struct Console {
     initial_termios: Option<Termios>,
     next_char: Option<u8>,
@@ -20,6 +50,10 @@ impl Console {
     pub fn new() -> Console {
         // Prepare terminal
         let initial_termios = Termios::from_fd(STDIN_FD).ok();
+        #[cfg(feature = "videobeast")]
+        if let Some(initial) = initial_termios {
+            restore_terminal_at_exit(initial);
+        }
 
         let c = Console {
             initial_termios,

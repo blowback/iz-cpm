@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn palette_overflow_keeps_the_banks_up_to_3() {
-        let mut vb = VideoBeast::new();
+        let mut vb = VideoBeast::new().unwrap();
         let before: Vec<u8> = (0..512).map(|i| vb.palette_byte(2, i)).collect();
         let regs: Vec<u8> = (0..=255).map(|r| vb.register(r)).collect();
         let data: Vec<u8> = (0..256).map(|i| (i as u8) ^ 0x5A).collect();
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn vram_copy_lands_at_its_address_up_to_the_top() {
-        let mut vb = VideoBeast::new();
+        let mut vb = VideoBeast::new().unwrap();
         vb.preload_vram(0xFFF00, &[0xAB; 256]);
         vb.preload_vram(0x20000, &[1, 2, 3]);
         let vram = vb.vram();

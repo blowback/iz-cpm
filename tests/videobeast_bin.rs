@@ -1,7 +1,7 @@
 #![cfg(feature = "videobeast")]
 // Runs the built binary, so the VideoBeast's stdout/stderr split and the
-// vendored exit(1) on a missing asset can be seen from outside. Each test
-// is its own process, so they may run in parallel.
+// exit code 1 when the shim finds a missing asset can be seen from outside.
+// Each test is its own process, so they may run in parallel.
 
 mod common;
 use common::*;

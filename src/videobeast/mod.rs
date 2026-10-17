@@ -64,16 +64,18 @@ pub struct VideoBeast {
 impl VideoBeast {
     /// Creates a VideoBeast at time 0, loading its start-up registers and
     /// palettes from `$BEASTEM_ASSETS`, or from the vendored assets when that
-    /// is unset. A missing asset ends the process (the vendored `exit(1)`).
-    /// SDL runs on its dummy video driver, so nothing shows on screen.
-    pub fn new() -> VideoBeast {
+    /// is unset. SDL runs on its dummy video driver, so nothing shows on
+    /// screen. `Err` if it cannot start (a missing asset, SDL failing), after
+    /// the shim has logged one line on stderr saying why.
+    pub fn new() -> Result<VideoBeast, ()> {
         VideoBeast::create(false)
     }
 
     /// As `new`, but SDL uses its usual video driver, so the VideoBeast's
-    /// window shows on screen (`--window`). If SDL cannot open the window
-    /// the vendored code logs and ends the process with exit code 1.
-    pub fn with_window() -> VideoBeast {
+    /// window shows on screen (`--window`). `Err` also if SDL can only run
+    /// headless. If SDL starts but the window cannot be created, the
+    /// vendored code logs and ends the process with exit code 1.
+    pub fn with_window() -> Result<VideoBeast, ()> {
         VideoBeast::create(true)
     }
 
@@ -82,7 +84,7 @@ impl VideoBeast {
         self.handle.as_ptr()
     }
 
-    fn create(windowed: bool) -> VideoBeast {
+    fn create(windowed: bool) -> Result<VideoBeast, ()> {
         // A panic in another run (a failed test) must not block this one.
         let sdl_owner = SDL_OWNER.lock().unwrap_or_else(|e| e.into_inner());
         let dir = match std::env::var("BEASTEM_ASSETS") {
@@ -91,8 +93,9 @@ impl VideoBeast {
         };
         let dir = CString::new(dir).expect("asset path contains a NUL byte");
         let handle = unsafe { vbshim_create(dir.as_ptr(), windowed as c_int) };
-        let handle = NonNull::new(handle).expect("VideoBeast: SDL failed to start");
-        VideoBeast { handle, next_tick_ps: 0, _sdl_owner: sdl_owner }
+        // The shim logs one stderr line on every failure it returns NULL for.
+        let handle = NonNull::new(handle).ok_or(())?;
+        Ok(VideoBeast { handle, next_tick_ps: 0, _sdl_owner: sdl_owner })
     }
 
     /// Reads at `offset` (masked to 14 bits) within the 16 KB window.
@@ -204,7 +207,7 @@ mod tests {
 
     #[test]
     fn frame_count_steps_at_each_line_counter_wrap() {
-        let mut vb = VideoBeast::new();
+        let mut vb = VideoBeast::new().unwrap();
         let t = PS_PER_T_STATE;
         // Start-up mode 0x08: frames of 525 lines x 256 T-states. beastem's
         // first frame start, one line in, leaves the counter at 0.
@@ -221,7 +224,7 @@ mod tests {
 
     #[test]
     fn frame_is_the_640x480_window_surface() {
-        let mut vb = VideoBeast::new();
+        let mut vb = VideoBeast::new().unwrap();
         // One mode-0 frame: 525 lines of 256 T-states.
         vb.catch_up(525 * 256 * PS_PER_T_STATE);
         let frame = vb.frame().expect("window surface");
