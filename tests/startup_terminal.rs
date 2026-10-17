@@ -116,11 +116,13 @@ fn window_without_a_display_restores_the_terminal() {
 
 #[test]
 fn console_polling_on_a_terminal_with_no_key_runs_to_the_cycle_limit() {
-    // `script` sends an EOT to the pty when its own stdin ends; CONPOLL.COM
-    // reads it and echoes it just before `rc=`, then keeps polling a terminal
-    // with no key waiting until the cycle limit.
+    // `script` writes a control byte to the pty when its own stdin ends (EOT
+    // here, NUL on the CI runner); CONPOLL.COM reads it and echoes it just
+    // before `rc=`, then keeps polling a terminal with no key waiting until
+    // the cycle limit.
     let run = run_on_pty("conpoll", &["--max-cycles", "2000000", CONPOLL], &[], &[]);
-    assert_eq!(run.rc.trim_start_matches('\u{4}'), "rc=2", "stderr: {:?}", run.stderr);
+    let rc = run.rc.trim_start_matches(|c: char| c.is_control());
+    assert_eq!(rc, "rc=2", "stderr: {:?}", run.stderr);
     assert!(!run.stderr.contains("console input ended"), "stderr: {:?}", run.stderr);
     assert_eq!(run.before, run.after, "terminal settings changed");
 }
