@@ -9,4 +9,9 @@ pub trait ConsoleEmulator {
     fn input_ended(&self) -> bool {
         false
     }
+    /// Gives the console the CPU's emulated T-state count before each
+    /// instruction, so a status check sees the count at its trap and the
+    /// console can tell how close together status checks are.
+    #[cfg(feature = "videobeast")]
+    fn note_cycle_count(&mut self, _t_states: u64) {}
 }

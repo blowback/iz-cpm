@@ -8,6 +8,16 @@ use crate::console_emulator::ConsoleEmulator;
 
 const STDIN_FD: i32 = 0;
 
+// A status check that finds stdin, not a terminal, at end of file more than
+// this many T-states after the previous one starts a new run of polls.
+#[cfg(feature = "videobeast")]
+const POLL_RUN_MAX_GAP_T_STATES: u64 = 1_000;
+
+// A run of polls at end of file that spans this many T-states (one frame)
+// ends console input.
+#[cfg(feature = "videobeast")]
+const POLL_RUN_END_T_STATES: u64 = 134_400;
+
 // The terminal settings found at start-up, for `restore_at_exit`.
 #[cfg(feature = "videobeast")]
 static AT_EXIT_TERMIOS: std::sync::OnceLock<Termios> = std::sync::OnceLock::new();
@@ -41,9 +51,18 @@ fn restore_terminal_at_exit(initial: Termios) {
 pub struct Console {
     initial_termios: Option<Termios>,
     next_char: Option<u8>,
-    // Set when a blocking read finds stdin at end of file.
+    // Set when a blocking read finds stdin at end of file, or when a
+    // program keeps polling console status at end of file (see `status`).
     #[cfg(feature = "videobeast")]
     input_ended: bool,
+    // The CPU's T-state count, given before each instruction, so a status
+    // check sees the count at its trap.
+    #[cfg(feature = "videobeast")]
+    cycle_count: u64,
+    // The current run of status checks at end of file: the T-state count
+    // at its first poll and at its latest. A console read or write ends it.
+    #[cfg(feature = "videobeast")]
+    poll_run: Option<(u64, u64)>,
 }
 
 impl Console {
@@ -60,6 +79,10 @@ impl Console {
             next_char: None,
             #[cfg(feature = "videobeast")]
             input_ended: false,
+            #[cfg(feature = "videobeast")]
+            cycle_count: 0,
+            #[cfg(feature = "videobeast")]
+            poll_run: None,
         };
 
         c.setup_host_terminal(false);
@@ -97,6 +120,25 @@ impl Console {
         result.unwrap();
         buf[0]
     }
+
+    // Records a status check that found stdin, not a terminal, at end of
+    // file. Only a program that keeps polling, with no console read or write
+    // and no gap over POLL_RUN_MAX_GAP_T_STATES between polls, for
+    // POLL_RUN_END_T_STATES ends console input; a CCP `DIR` or an abort-key
+    // check between other work keeps seeing "no key".
+    #[cfg(feature = "videobeast")]
+    fn note_poll_at_end_of_file(&mut self) {
+        let now = self.cycle_count;
+        match self.poll_run {
+            Some((start, last)) if now.saturating_sub(last) <= POLL_RUN_MAX_GAP_T_STATES => {
+                self.poll_run = Some((start, now));
+                if now.saturating_sub(start) >= POLL_RUN_END_T_STATES {
+                    self.input_ended = true;
+                }
+            }
+            _ => self.poll_run = Some((now, now)),
+        }
+    }
 }
 
 impl ConsoleEmulator for Console {
@@ -105,7 +147,16 @@ impl ConsoleEmulator for Console {
             Some(_) => true,
             None => {
                 let mut buf = [0];
-                let size = stdin().read(&mut buf).unwrap_or(0);
+                let result = stdin().read(&mut buf);
+                // A terminal set up with VMIN 0 also reads 0 bytes when no
+                // key is waiting, so only stdin that is not a terminal is at
+                // end of file here. A read error is never end of file.
+                #[cfg(feature = "videobeast")]
+                if matches!(result, Ok(0)) && self.initial_termios.is_none() {
+                    self.note_poll_at_end_of_file();
+                    return false;
+                }
+                let size = result.unwrap_or(0);
                 if size != 0 {
                     self.next_char = Some(buf[0]);
                     true
@@ -119,6 +170,10 @@ impl ConsoleEmulator for Console {
     }
 
     fn read(&mut self) -> u8 {
+        #[cfg(feature = "videobeast")]
+        {
+            self.poll_run = None;
+        }
         match self.next_char {
             Some(ch) => {
                 self.next_char = None;
@@ -139,8 +194,17 @@ impl ConsoleEmulator for Console {
         self.input_ended
     }
 
+    #[cfg(feature = "videobeast")]
+    fn note_cycle_count(&mut self, t_states: u64) {
+        self.cycle_count = t_states;
+    }
+
     fn put(&mut self, sequence: Option<String>) {
         if let Some(sequence) = sequence {
+            #[cfg(feature = "videobeast")]
+            {
+                self.poll_run = None;
+            }
             print!("{}", sequence);
             stdout().flush().unwrap();
         }

@@ -105,3 +105,81 @@ fn console_input_ending_before_a_warm_boot_exits_1() {
     assert!(!err.contains("panicked"), "stderr: {:?}", err);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn console_polling_at_end_of_input_exits_1() {
+    // CONPOLL.COM only polls with BDOS 11 while no key is waiting, so the
+    // status check is what must find stdin at end of file.
+    // No --max-cycles: that is the case covered. A deadline turns a hang
+    // into a failure.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
+        .arg("tests/artifacts/vb/CONPOLL.COM")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start iz-cpm");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while child.try_wait().expect("poll iz-cpm").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("iz-cpm still running after 5 s polling at end of input");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let out = child.wait_with_output().expect("wait for iz-cpm");
+    let err = stderr(&out);
+    assert_eq!(stdout(&out), "");
+    assert!(err.ends_with("iz-cpm: console input ended\n"), "stderr: {:?}", err);
+    assert!(!err.contains("panicked"), "stderr: {:?}", err);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn console_polling_at_end_of_input_exits_1_before_the_cycle_limit() {
+    let out = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
+        .args(["--max-cycles", "2000000", "tests/artifacts/vb/CONPOLL.COM"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run iz-cpm");
+    let err = stderr(&out);
+    assert_eq!(stdout(&out), "");
+    assert!(err.ends_with("iz-cpm: console input ended\n"), "stderr: {:?}", err);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn piped_input_reaches_a_polling_program_before_input_ends() {
+    // CONPOLL.COM echoes each key it reads, so stdout shows what reached it.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
+        .args(["--max-cycles", "2000000", "tests/artifacts/vb/CONPOLL.COM"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start iz-cpm");
+    child.stdin.take().unwrap().write_all(b"abc").unwrap();
+    let out = child.wait_with_output().expect("wait for iz-cpm");
+    let err = stderr(&out);
+    assert_eq!(stdout(&out), "abc");
+    assert!(err.ends_with("iz-cpm: console input ended\n"), "stderr: {:?}", err);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn slow_polling_at_end_of_input_runs_to_the_cycle_limit() {
+    // CONSLOW.COM polls with BDOS 11 about every 2,600 T-states, too far
+    // apart to count as spinning on status, so stdin at end of file does not
+    // end the run.
+    let out = Command::new(env!("CARGO_BIN_EXE_iz-cpm"))
+        .args(["--max-cycles", "2000000", "tests/artifacts/vb/CONSLOW.COM"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run iz-cpm");
+    let err = stderr(&out);
+    assert!(out.stdout.is_empty(), "stdout: {:?}", stdout(&out));
+    assert!(!err.contains("console input ended"), "stderr: {:?}", err);
+    assert!(err.contains("--max-cycles 2000000"), "stderr: {:?}", err);
+    assert_eq!(out.status.code(), Some(2));
+}

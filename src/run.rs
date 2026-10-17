@@ -462,6 +462,8 @@ pub fn run(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) -
             break EXIT_ERROR;
         }
 
+        #[cfg(feature = "videobeast")]
+        console.note_cycle_count(cpu.cycle_count());
         let mut er = bios.execute(console, cpu.registers(), call_trace_all);
         if er == ExecutionResult::Continue {
             er = execute_bdos(&mut bdos, &mut bios, console, &mut machine,
