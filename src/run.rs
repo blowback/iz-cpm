@@ -198,7 +198,9 @@ pub fn run(command_line: Option<Vec<&str>>, console: &mut dyn ConsoleEmulator) -
     // Init device
     let mut machine = CpmMachine::new();
     #[cfg(feature = "videobeast")]
-    vb.attach(&mut machine);
+    if vb.attach(&mut machine).is_err() {
+        return EXIT_ERROR;
+    }
     if let Some(path) = dump_basename {
         machine.set_dump_basename(std::path::PathBuf::from(path));
     }
@@ -624,11 +626,13 @@ impl VideoBeastRun {
 
     /// Starts the VideoBeast, with `--window` if given, applies
     /// `--vb-preload` and attaches it to `machine` with the `--joy` script.
-    fn attach(&mut self, machine: &mut CpmMachine) {
-        let mut videobeast = if self.window { VideoBeast::with_window() } else { VideoBeast::new() };
+    /// `Err` if the VideoBeast cannot start; the shim has logged why.
+    fn attach(&mut self, machine: &mut CpmMachine) -> Result<(), ()> {
+        let mut videobeast = if self.window { VideoBeast::with_window() } else { VideoBeast::new() }?;
         std::mem::take(&mut self.preload).apply(&mut videobeast);
         machine.attach_videobeast(videobeast);
         machine.set_joy_script(std::mem::take(&mut self.joy_script));
+        Ok(())
     }
 
     /// Makes emulated time 0 now for `--window` pacing.

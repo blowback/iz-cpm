@@ -560,7 +560,7 @@ mod tests {
     fn joystick_reads_0_until_frames_start_with_videobeast_attached() {
         // The CCP case: a VideoBeast is attached but no .COM has started.
         let mut m = CpmMachine::new();
-        m.attach_videobeast(VideoBeast::new());
+        m.attach_videobeast(VideoBeast::new().unwrap());
         m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
         assert_eq!(m.current_frame(), None);
         assert_eq!(m.port_in(0x9F), 0x00);
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn live_joystick_overrides_the_script_once_frames_start() {
         let mut m = CpmMachine::new();
-        m.attach_videobeast(VideoBeast::new());
+        m.attach_videobeast(VideoBeast::new().unwrap());
         m.set_joy_script(JoyScript::parse("joy.txt", "0 0x05\n").unwrap());
         m.set_live_joy(Some(0x30));
         assert_eq!(m.port_in(0x9F), 0x00);
