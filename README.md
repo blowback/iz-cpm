@@ -153,7 +153,7 @@ The process exit code says how the run ended:
 
 A VideoBeast that cannot start ends iz-cpm with exit code 1 before the CPU starts. A missing beastem asset, SDL failing to start, or `--window` with no display ends it after one stderr line saying why, e.g. `Register file does not exist: <path>`. If SDL starts but cannot create the window, beastem logs the reason and ends the process itself. In every case, on Unix the terminal is left with the settings it had before iz-cpm started.
 
-On Unix, if the console waits for a key and stdin is at end of file, for example piped input that ran out before the program warm booted, iz-cpm logs `iz-cpm: console input ended` on stderr and exits with code 1.
+On Unix, when stdin is at end of file, for example piped input that ran out before the program warm booted, iz-cpm logs `iz-cpm: console input ended` on stderr and exits with code 1 if the console waits for a key, or if a program keeps polling console status (BDOS function 11 or 6, or BIOS CONST) for about a frame (134,400 T-states) with nothing in between: no console read or write, and no more than 1,000 T-states between polls. A program that polls less often, such as once per frame, or prints between polls, such as the CCP's `DIR`, keeps seeing no key. A terminal with no key waiting never counts as end of file.
 
 The stock build keeps its output on stdout and exits 0, except that on Unix it panics when the console waits for a key and stdin is at end of file.
 

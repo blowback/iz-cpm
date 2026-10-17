@@ -2,6 +2,8 @@
 // A VideoBeast that cannot start must end iz-cpm with exit code 1 and leave
 // the terminal as it found it. Each test runs the built binary on a pty made
 // by util-linux `script`, prints `stty -g` before and after, and compares.
+// The last test checks that console polling on a terminal with no key
+// waiting is not taken for end of input.
 
 mod common;
 use common::*;
@@ -12,6 +14,7 @@ use std::process::{Command, Stdio};
 
 const VBTRACE: &str = "tests/artifacts/vb/VBTRACE.COM";
 const LOOP: &str = "tests/artifacts/vb/LOOP.COM";
+const CONPOLL: &str = "tests/artifacts/vb/CONPOLL.COM";
 const ASSETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/beastem/assets");
 
 /// What a run on a pty showed: terminal settings before and after, the exit
@@ -109,4 +112,15 @@ fn window_without_a_display_restores_the_terminal() {
     // run forever; the cycle limit ends it with exit 2, failing the test.
     let run = run_on_pty("no-display", &["--window", "--max-cycles", "8000000", LOOP], &[], &unset);
     assert_failed_start(&run, "vbshim: --window: no display to open a window on");
+}
+
+#[test]
+fn console_polling_on_a_terminal_with_no_key_runs_to_the_cycle_limit() {
+    // `script` sends an EOT to the pty when its own stdin ends; CONPOLL.COM
+    // reads it and echoes it just before `rc=`, then keeps polling a terminal
+    // with no key waiting until the cycle limit.
+    let run = run_on_pty("conpoll", &["--max-cycles", "2000000", CONPOLL], &[], &[]);
+    assert_eq!(run.rc.trim_start_matches('\u{4}'), "rc=2", "stderr: {:?}", run.stderr);
+    assert!(!run.stderr.contains("console input ended"), "stderr: {:?}", run.stderr);
+    assert_eq!(run.before, run.after, "terminal settings changed");
 }
